@@ -1,15 +1,17 @@
 mod ast;
 mod lexer;
 mod parser;
+mod sema;
 mod span;
 
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use parser::Parser;
+use sema::Severity;
 
 fn compile(name: &str, source: &str) {
     println!("── {} ──", name);
 
-    // Report lex errors first.
+    // 1. Lex errors.
     let (_, lex_errors) = lexer::lex(source);
     for err_span in &lex_errors {
         Report::build(ReportKind::Error, name, err_span.start)
@@ -24,15 +26,10 @@ fn compile(name: &str, source: &str) {
             .unwrap();
     }
 
+    // 2. Parse.
     let mut parser = Parser::new(source);
-    match parser.parse() {
-        Ok(program) => {
-            println!("Parsed successfully — version {}", program.version);
-            println!("{} statement(s):", program.statements.len());
-            for stmt in &program.statements {
-                println!("  {:?}", stmt);
-            }
-        }
+    let program = match parser.parse() {
+        Ok(p) => p,
         Err(e) => {
             Report::build(ReportKind::Error, name, e.span.start)
                 .with_message(&e.message)
@@ -44,35 +41,108 @@ fn compile(name: &str, source: &str) {
                 .finish()
                 .eprint((name, Source::from(source)))
                 .unwrap();
+            println!();
+            return;
         }
+    };
+
+    // 3. Semantic analysis.
+    let diagnostics = sema::analyze(&program);
+    let has_errors = diagnostics
+        .iter()
+        .any(|d| matches!(d.severity, Severity::Error));
+
+    for diag in &diagnostics {
+        let kind = match diag.severity {
+            Severity::Error => ReportKind::Error,
+            Severity::Warning => ReportKind::Warning,
+        };
+        let color = match diag.severity {
+            Severity::Error => Color::Red,
+            Severity::Warning => Color::Yellow,
+        };
+
+        let mut report = Report::build(kind, name, diag.span.start)
+            .with_message(&diag.message)
+            .with_label(
+                Label::new((name, diag.span.clone()))
+                    .with_message(&diag.message)
+                    .with_color(color),
+            );
+
+        if let Some((note, note_span)) = &diag.secondary {
+            report = report.with_label(
+                Label::new((name, note_span.clone()))
+                    .with_message(note)
+                    .with_color(Color::Blue),
+            );
+        }
+
+        report
+            .finish()
+            .eprint((name, Source::from(source)))
+            .unwrap();
     }
+
+    if !has_errors && diagnostics.is_empty() {
+        println!("✓ no errors");
+    } else if !has_errors {
+        println!("✓ no errors ({} warning(s))", diagnostics.len());
+    }
+
+    println!("  {} statement(s) parsed", program.statements.len());
     println!();
 }
 
 fn main() {
+    // Valid program.
     compile(
         "bell.qasm",
-        r#"OPENQASM 3.0;
-qubit[2] q;
-bit[2] c;
-h q[0];
-cx q[0], q[1];
-c = measure q;
-"#,
+        "OPENQASM 3.0;\n\
+         qubit[2] q;\n\
+         bit[2] c;\n\
+         h q[0];\n\
+         cx q[0], q[1];\n\
+         c = measure q;\n",
     );
 
+    // Use after measurement — no-cloning violation.
     compile(
-        "bad_semicolon.qasm",
-        r#"OPENQASM 3.0;
-qubit[2] q
-bit[2] c;
-"#,
+        "use_after_measure.qasm",
+        "OPENQASM 3.0;\n\
+         qubit[2] q;\n\
+         bit[2] c;\n\
+         h q[0];\n\
+         c = measure q;\n\
+         cx q[0], q[1];\n",
     );
 
+    // Reset clears measured state.
     compile(
-        "bad_token.qasm",
-        r#"OPENQASM 3.0;
-qubit # q;
-"#,
+        "reset_ok.qasm",
+        "OPENQASM 3.0;\n\
+         qubit q;\n\
+         bit c;\n\
+         h q;\n\
+         measure q;\n\
+         reset q;\n\
+         h q;\n",
+    );
+
+    // Undeclared + out of bounds.
+    compile(
+        "bad_refs.qasm",
+        "OPENQASM 3.0;\n\
+         qubit[2] q;\n\
+         h r[0];\n\
+         cx q[0], q[5];\n",
+    );
+
+    // Kind mismatch: gate on a bit.
+    compile(
+        "kind_mismatch.qasm",
+        "OPENQASM 3.0;\n\
+         bit c;\n\
+         h c;\n",
     );
 }

@@ -1,9 +1,0 @@
-[package]
-name = "qasm-rs"
-version = "0.1.0"
-edition = "2021"
-description = "An OpenQASM 3 compiler written in Rust"
-
-[dependencies]
-logos = "0.14"
-ariadne = "0.4"
