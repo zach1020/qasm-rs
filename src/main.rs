@@ -1,4 +1,5 @@
 mod ast;
+mod codegen;
 mod lexer;
 mod parser;
 mod sema;
@@ -84,18 +85,22 @@ fn compile(name: &str, source: &str) {
             .unwrap();
     }
 
-    if !has_errors && diagnostics.is_empty() {
-        println!("✓ no errors");
-    } else if !has_errors {
-        println!("✓ no errors ({} warning(s))", diagnostics.len());
+    if has_errors {
+        println!("  ✗ {} error(s) — codegen skipped\n", diagnostics.len());
+        return;
     }
 
-    println!("  {} statement(s) parsed", program.statements.len());
+    // 4. Codegen — emit canonical QASM.
+    let output = codegen::emit(&program);
+    println!("  ✓ emitted QASM:\n");
+    for line in output.lines() {
+        println!("    {}", line);
+    }
     println!();
 }
 
 fn main() {
-    // Valid program.
+    // Valid Bell pair — full pipeline.
     compile(
         "bell.qasm",
         "OPENQASM 3.0;\n\
@@ -117,7 +122,7 @@ fn main() {
          cx q[0], q[1];\n",
     );
 
-    // Reset clears measured state.
+    // Reset clears measured state — should pass.
     compile(
         "reset_ok.qasm",
         "OPENQASM 3.0;\n\
@@ -136,13 +141,5 @@ fn main() {
          qubit[2] q;\n\
          h r[0];\n\
          cx q[0], q[5];\n",
-    );
-
-    // Kind mismatch: gate on a bit.
-    compile(
-        "kind_mismatch.qasm",
-        "OPENQASM 3.0;\n\
-         bit c;\n\
-         h c;\n",
     );
 }
