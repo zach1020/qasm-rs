@@ -35,11 +35,56 @@ fn emit_stmt(out: &mut String, stmt: &Stmt) {
             out.push_str(&format!(" {};\n", name));
         }
 
-        Stmt::GateCall { name, args, .. } => {
+        Stmt::GateCall {
+            name,
+            modifiers,
+            params,
+            args,
+            ..
+        } => {
+            for m in modifiers {
+                emit_modifier(out, m);
+            }
             out.push_str(name);
+            if !params.is_empty() {
+                out.push('(');
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    emit_expr(out, p);
+                }
+                out.push(')');
+            }
             out.push(' ');
             emit_operand_list(out, args);
             out.push_str(";\n");
+        }
+
+        Stmt::GateDef {
+            name,
+            params,
+            qparams,
+            body,
+            ..
+        } => {
+            out.push_str("gate ");
+            out.push_str(name);
+            if !params.is_empty() {
+                out.push('(');
+                out.push_str(&params.join(", "));
+                out.push(')');
+            }
+            if !qparams.is_empty() {
+                out.push(' ');
+                out.push_str(&qparams.join(", "));
+            }
+            out.push_str(" {\n");
+            for stmt in body {
+                out.push_str("  ");
+                emit_stmt(out, stmt);
+            }
+            out.push_str("}\n");
         }
 
         Stmt::Measure { qubit, target, .. } => {
@@ -68,6 +113,75 @@ fn emit_operand_list(out: &mut String, ops: &[GateOperand]) {
             out.push_str(", ");
         }
         out.push_str(&op.to_string());
+    }
+}
+
+fn emit_modifier(out: &mut String, m: &GateModifier) {
+    match m {
+        GateModifier::Ctrl(arg, _) => {
+            out.push_str("ctrl");
+            if let Some(e) = arg {
+                out.push('(');
+                emit_expr(out, e);
+                out.push(')');
+            }
+            out.push_str(" @ ");
+        }
+        GateModifier::NegCtrl(arg, _) => {
+            out.push_str("negctrl");
+            if let Some(e) = arg {
+                out.push('(');
+                emit_expr(out, e);
+                out.push(')');
+            }
+            out.push_str(" @ ");
+        }
+        GateModifier::Inv(_) => {
+            out.push_str("inv @ ");
+        }
+        GateModifier::Pow(e, _) => {
+            out.push_str("pow(");
+            emit_expr(out, e);
+            out.push_str(") @ ");
+        }
+    }
+}
+
+fn emit_expr(out: &mut String, expr: &Expr) {
+    match expr {
+        Expr::IntLit(n, _) => out.push_str(&n.to_string()),
+        Expr::FloatLit(f, _) => out.push_str(&format!("{}", f)),
+        Expr::Ident(name, _) => out.push_str(name),
+        Expr::Const(kind, _) => out.push_str(&kind.to_string()),
+        Expr::Neg(inner, _) => {
+            out.push('-');
+            emit_expr(out, inner);
+        }
+        Expr::BinOp {
+            op, lhs, rhs, ..
+        } => {
+            // Wrap sub-expressions in parens if they're also binops (safe overapproximation).
+            let needs_parens_lhs = matches!(**lhs, Expr::BinOp { .. });
+            let needs_parens_rhs = matches!(**rhs, Expr::BinOp { .. });
+
+            if needs_parens_lhs {
+                out.push('(');
+            }
+            emit_expr(out, lhs);
+            if needs_parens_lhs {
+                out.push(')');
+            }
+
+            out.push_str(&format!(" {} ", op));
+
+            if needs_parens_rhs {
+                out.push('(');
+            }
+            emit_expr(out, rhs);
+            if needs_parens_rhs {
+                out.push(')');
+            }
+        }
     }
 }
 

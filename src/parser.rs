@@ -19,7 +19,7 @@ impl std::fmt::Display for ParseError {
         write!(
             f,
             "error at {}..{}: {}",
-            self.span.start, self.span.end, self.message 
+            self.span.start, self.span.end, self.message
         )
     }
 }
@@ -38,14 +38,14 @@ impl Parser {
         }
     }
 
-    // Helpers
+    // ── Helpers ──────────────────────────────────────────────
 
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.pos).map(|s| &s.node)
     }
 
     fn peek_span(&self) -> Span {
-        self.tokens 
+        self.tokens
             .get(self.pos)
             .map(|s| s.span.clone())
             .unwrap_or(self.source_len..self.source_len)
@@ -56,9 +56,10 @@ impl Parser {
         if tok.is_some() {
             self.pos += 1;
         }
-        tok 
+        tok
     }
 
+    #[allow(dead_code)]
     fn prev_span(&self) -> Span {
         if self.pos > 0 {
             self.tokens[self.pos - 1].span.clone()
@@ -74,7 +75,7 @@ impl Parser {
     fn error(&self, msg: impl Into<String>) -> ParseError {
         ParseError {
             message: msg.into(),
-            span: Self.peek_span(),
+            span: self.peek_span(),
         }
     }
 
@@ -86,16 +87,20 @@ impl Parser {
                 Ok(span)
             }
             Some(s) => Err(ParseError {
+                message: format!("expected {:?}, found {:?}", expected, s.node),
+                span: s.span.clone(),
+            }),
+            None => Err(ParseError {
                 message: format!("expected {:?}, found end of file", expected),
                 span: self.source_len..self.source_len,
             }),
         }
     }
 
-    fn expect ident(&mut self) -> Result<(String, Span)> {
+    fn expect_ident(&mut self) -> Result<(String, Span)> {
         match self.tokens.get(self.pos) {
             Some(Spanned {
-                node: Toekn::Ident(name),
+                node: Token::Ident(name),
                 span,
             }) => {
                 let name = name.clone();
@@ -107,7 +112,7 @@ impl Parser {
                 message: format!("expected identifier, found {:?}", s.node),
                 span: s.span.clone(),
             }),
-            None => Err (ParseError {
+            None => Err(ParseError {
                 message: "expected identifier, found end of file".into(),
                 span: self.source_len..self.source_len,
             }),
@@ -115,23 +120,25 @@ impl Parser {
     }
 
     fn merge(a: &Span, b: &Span) -> Span {
-        a.start.min(b.start)..a.end.mex(b.end)
+        a.start.min(b.start)..a.end.max(b.end)
     }
 
-    // Check if the current token matches without consuming
     fn check(&self, expected: &Token) -> bool {
         self.peek() == Some(expected)
     }
 
-    // Top-Level
+    // ── Top-level ───────────────────────────────────────────
 
     pub fn parse(&mut self) -> Result<Program> {
         let version = self.parse_version()?;
-        let must statements = Vec::new();
+        let mut statements = Vec::new();
         while !self.at_end() {
-            statments.push(self.parse_stmt()?);
+            statements.push(self.parse_stmt()?);
         }
-        Ok(Program { version, statments })
+        Ok(Program {
+            version,
+            statements,
+        })
     }
 
     fn parse_version(&mut self) -> Result<String> {
@@ -141,14 +148,18 @@ impl Parser {
                 self.advance();
                 format!("{}", v)
             }
+            Some(Token::IntLiteral(v)) => {
+                self.advance();
+                format!("{}", v)
+            }
             _ => return Err(self.error("expected version number after OPENQASM")),
         };
         self.expect(&Token::Semicolon)?;
         Ok(ver)
     }
 
-    // Statements
-    
+    // ── Statements ──────────────────────────────────────────
+
     fn parse_stmt(&mut self) -> Result<Stmt> {
         match self.peek() {
             Some(Token::Qubit) => self.parse_qubit_decl(),
@@ -156,39 +167,39 @@ impl Parser {
             Some(Token::Qreg) => self.parse_qreg_decl(),
             Some(Token::Creg) => self.parse_creg_decl(),
             Some(Token::Gate) => self.parse_gate_def(),
-            Some(Token::Measure) => self.parse_reset_stmt(),
+            Some(Token::Measure) => self.parse_measure_stmt(),
             Some(Token::Reset) => self.parse_reset_stmt(),
             Some(Token::Barrier) => self.parse_barrier_stmt(),
-            // Gate modifier start a gate call: `ctrl @ x q[0], q[1];`
-            Some(Token::Ctrl) | Some(Token::NegCtrl) | Some(Token::Inv) | Some(Token::Pow) => {
-                self.parse_modified_gate_call()
-            }
+            Some(Token::Ctrl)
+            | Some(Token::NegCtrl)
+            | Some(Token::Inv)
+            | Some(Token::Pow) => self.parse_modified_gate_call(),
             Some(Token::Ident(_)) => self.parse_ident_stmt(),
-            _ => Err(self.error("unexpected token at statment level")),
+            _ => Err(self.error("unexpected token at statement level")),
         }
     }
 
     fn parse_qubit_decl(&mut self) -> Result<Stmt> {
         let start = self.peek_span();
-        self.advance();
+        self.advance(); // consume `qubit`
         let size = self.parse_optional_size()?;
-        let name, _) = self.expect_ident()?;
+        let (name, _) = self.expect_ident()?;
         let end = self.expect(&Token::Semicolon)?;
         Ok(Stmt::QubitDecl {
-            name, 
+            name,
             size,
-            span: Self::merge(&start, &endl),
+            span: Self::merge(&start, &end),
         })
     }
 
     fn parse_bit_decl(&mut self) -> Result<Stmt> {
         let start = self.peek_span();
-        self.advance();
+        self.advance(); // consume `bit`
         let size = self.parse_optional_size()?;
-        let (name, _) = self.expecte_ident()?;
+        let (name, _) = self.expect_ident()?;
         let end = self.expect(&Token::Semicolon)?;
         Ok(Stmt::BitDecl {
-            name, 
+            name,
             size,
             span: Self::merge(&start, &end),
         })
@@ -196,7 +207,7 @@ impl Parser {
 
     fn parse_qreg_decl(&mut self) -> Result<Stmt> {
         let start = self.peek_span();
-        self.advance();
+        self.advance(); // consume `qreg`
         let (name, _) = self.expect_ident()?;
         let size = self.parse_optional_size()?;
         let end = self.expect(&Token::Semicolon)?;
@@ -209,7 +220,7 @@ impl Parser {
 
     fn parse_creg_decl(&mut self) -> Result<Stmt> {
         let start = self.peek_span();
-        self.advance();
+        self.advance(); // consume `creg`
         let (name, _) = self.expect_ident()?;
         let size = self.parse_optional_size()?;
         let end = self.expect(&Token::Semicolon)?;
@@ -223,12 +234,12 @@ impl Parser {
     fn parse_optional_size(&mut self) -> Result<Option<u64>> {
         if self.check(&Token::LBracket) {
             self.advance();
-            let n = match self.peek.cloned() {
-                Some(Token::intLiteral(n)) => {
+            let n = match self.peek().cloned() {
+                Some(Token::IntLiteral(n)) => {
                     self.advance();
-                    n 
+                    n
                 }
-                _ => return Err(self.error("expected integer size in brackets"),)
+                _ => return Err(self.error("expected integer size in brackets")),
             };
             self.expect(&Token::RBracket)?;
             Ok(Some(n))
@@ -237,8 +248,9 @@ impl Parser {
         }
     }
 
-    // Gate definition
-    // `gat name(params) qargs { body }`
+    // ── Gate definition ─────────────────────────────────────
+    // `gate name(params) qargs { body }`
+
     fn parse_gate_def(&mut self) -> Result<Stmt> {
         let start = self.peek_span();
         self.advance(); // consume `gate`
@@ -247,7 +259,7 @@ impl Parser {
 
         // Optional classical parameters: `(theta, phi)`
         let params = if self.check(&Token::LParen) {
-            self.advnce();
+            self.advance();
             let list = self.parse_ident_list()?;
             self.expect(&Token::RParen)?;
             list
@@ -258,7 +270,7 @@ impl Parser {
         // Qubit parameters: `q` or `c, t`
         let qparams = self.parse_ident_list()?;
 
-        // Body: `{ ,,, }`
+        // Body: `{ ... }`
         self.expect(&Token::LBrace)?;
         let mut body = Vec::new();
         while !self.check(&Token::RBrace) && !self.at_end() {
@@ -275,7 +287,7 @@ impl Parser {
         })
     }
 
-    // Parse a comma-separated list of identifiers
+    /// Parse a comma-separated list of identifiers.
     fn parse_ident_list(&mut self) -> Result<Vec<String>> {
         let mut names = Vec::new();
         if let Some(Token::Ident(_)) = self.peek() {
@@ -290,20 +302,21 @@ impl Parser {
         Ok(names)
     }
 
-    // Statments allowed inside a gate body - only gate calls (possibly modified)
+    /// Statements allowed inside a gate body — only gate calls (possibly modified).
     fn parse_gate_body_stmt(&mut self) -> Result<Stmt> {
         match self.peek() {
-            Some(Token::Ctrl) | Some(Token::NegCtrl) | Some(Token::Inv) | Some(Token::Pow) => {
-                self.parse_modified_gate_call()
-            }
+            Some(Token::Ctrl)
+            | Some(Token::NegCtrl)
+            | Some(Token::Inv)
+            | Some(Token::Pow) => self.parse_modified_gate_call(),
             Some(Token::Ident(_)) => self.parse_gate_call_stmt(),
             _ => Err(self.error("only gate calls are allowed inside a gate body")),
         }
     }
 
-    // gate calls
+    // ── Gate calls ──────────────────────────────────────────
 
-    // Parse gate modifiers then a gate call: `ctrl @ inv @ x q[0], q[1];`
+    /// Parse gate modifiers then a gate call: `ctrl @ inv @ x q[0], q[1];`
     fn parse_modified_gate_call(&mut self) -> Result<Stmt> {
         let start = self.peek_span();
         let modifiers = self.parse_gate_modifiers()?;
@@ -322,7 +335,7 @@ impl Parser {
         })
     }
 
-    // Parse a chain of gate modifiers: `ctrl @`, `inv @`, `pow(k) @`
+    /// Parse a chain of gate modifiers: `ctrl @`, `inv @`, `pow(k) @`
     fn parse_gate_modifiers(&mut self) -> Result<Vec<GateModifier>> {
         let mut mods = Vec::new();
         loop {
@@ -335,136 +348,140 @@ impl Parser {
                         let e = self.parse_expr()?;
                         self.expect(&Token::RParen)?;
                         Some(e)
-                        } else {
-                            None 
-                        };
-                        let at = self.expect(&Token::At)?;
-                        mods.push(GateModifier::Ctrl(arg, Self::merge(&span, &at)));
-                    }
-                    Some(Token::NegCtrl) => {
-                        let span = self.peek_span();
+                    } else {
+                        None
+                    };
+                    let at = self.expect(&Token::At)?;
+                    mods.push(GateModifier::Ctrl(arg, Self::merge(&span, &at)));
+                }
+                Some(Token::NegCtrl) => {
+                    let span = self.peek_span();
+                    self.advance();
+                    let arg = if self.check(&Token::LParen) {
                         self.advance();
-                        let arg = if self.check(&Token::LParen) {
-                            self.advance();
-                            let e = self.parese_expr()?;
-                            self.expect(&Token::RParen)?;
-                            Some(e) 
-                        } else {
-                            None 
-                        };
-                        let at = self.expect(&Token::At)?;
-                        mods.push(GateModifier::NegCtrl(arg, Self::merge(&span, &at)));
-                    }
-                    Some(Token::Inv) => {
-                        let span = self.peek_span();
-                        self.advance();
-                        let at = self.expect(&Token::At)?;
-                        mods.push(GateModifier::Inv(Self::merge(&span, &at)));
-                    }
-                    Some(Token::Pow) => {
-                        let span = self.peek_span();
-                        self.advance();
-                        self.expect(&Token::LParen)?;
                         let e = self.parse_expr()?;
                         self.expect(&Token::RParen)?;
-                        let at = self.expect(&Token::At)?;
-                        mods.push(GateModifier::Pow(e, Self::merge(&span, &at)));
-                    }
-                    _ => break,
+                        Some(e)
+                    } else {
+                        None
+                    };
+                    let at = self.expect(&Token::At)?;
+                    mods.push(GateModifier::NegCtrl(arg, Self::merge(&span, &at)));
                 }
-            }
-            Ok(mods)
-        }
-
-        // Parse a bare gate call starting from an identifier (no modifiers)
-        fn parse_gate_call_stmt(&mut self) -> Result<Stmt> {
-            let start = self.peek_span();
-            let (name, _) = self.expect_ident()?;
-
-            let params = self.parse_optional_params()?;
-            let args = self.parse_operand_list()?;
-            let end = self.expect(&Token::Semicolon)?;
-
-            Ok(Stmt::GateCall {
-                name,
-                modifiers: Vec::new(),
-                params,
-                args,
-                span: Self::merge(&start, &end),
-            })
-        }
-
-        // Identifier at statement position -> assignment, or gate call.
-        fn parse_ident_stmt(&mut self) -> Result<Stmt> {
-            let start = self.peek_span();
-            let (name, name_span) = self.expect_ident()?;
-
-            // `c = measure q;`
-            if self.check(&Token::Equals) {
-                self.advance();
-                if self.check(&Token::Measure) {
+                Some(Token::Inv) => {
+                    let span = self.peek_span();
                     self.advance();
-                    let qubit = self.parse_operand()?;
-                    let end = self.expect(&Token::Semicolon)?;
-                    return Ok(Stmt::Measure {
-                        qubit, 
-                        target: Some(GateOperand{
-                            name,
-                            index: None,
-                            span: name_span,
-                        }),
-                        span: Self::merge(&start, &end),
-                    });
+                    let at = self.expect(&Token::At)?;
+                    mods.push(GateModifier::Inv(Self::merge(&span, &at)));
                 }
-                return Err(self.error(
-                    "only `name = measure ...` assignments supported so far",
-                ));
+                Some(Token::Pow) => {
+                    let span = self.peek_span();
+                    self.advance();
+                    self.expect(&Token::LParen)?;
+                    let e = self.parse_expr()?;
+                    self.expect(&Token::RParen)?;
+                    let at = self.expect(&Token::At)?;
+                    mods.push(GateModifier::Pow(e, Self::merge(&span, &at)));
+                }
+                _ => break,
             }
+        }
+        Ok(mods)
+    }
 
-            // Gate call with optional params: `rx(pi/2) q[0];`
-            let params = self.parse_optional_params()?;
-            let args = self.parse_operand_list()?;
-            let end = self.expect(&Token::Semicolon)?;
-            Ok(Stmt::GateCall {
-                name,
-                modifiers: Vec::new(),
-                params,
-                args,
-                span: Self::merge(&start, &end),
-            })
+    /// Parse a bare gate call starting from an identifier (no modifiers).
+    fn parse_gate_call_stmt(&mut self) -> Result<Stmt> {
+        let start = self.peek_span();
+        let (name, _) = self.expect_ident()?;
+
+        let params = self.parse_optional_params()?;
+        let args = self.parse_operand_list()?;
+        let end = self.expect(&Token::Semicolon)?;
+
+        Ok(Stmt::GateCall {
+            name,
+            modifiers: Vec::new(),
+            params,
+            args,
+            span: Self::merge(&start, &end),
+        })
+    }
+
+    /// Identifier at statement position → assignment or gate call.
+    fn parse_ident_stmt(&mut self) -> Result<Stmt> {
+        let start = self.peek_span();
+        let (name, name_span) = self.expect_ident()?;
+
+        // `c = measure q;`
+        if self.check(&Token::Equals) {
+            self.advance();
+            if self.check(&Token::Measure) {
+                self.advance();
+                let qubit = self.parse_operand()?;
+                let end = self.expect(&Token::Semicolon)?;
+                return Ok(Stmt::Measure {
+                    qubit,
+                    target: Some(GateOperand {
+                        name,
+                        index: None,
+                        span: name_span,
+                    }),
+                    span: Self::merge(&start, &end),
+                });
+            }
+            return Err(self.error(
+                "only `name = measure ...` assignments supported so far",
+            ));
         }
 
-        // Try to parse `(expr, expr, ...)` parameter list.
-        // Returns empty vec if no `(` present.
-        fn parse_optional_params(&mut self) -> Result<Vec<Expr>> {
-            if !slef.check(&Token::LParen) {
-                return Ok(Vec::new());
-            }
-            self.advance(); // consume `(`
+        // Gate call with optional params: `rx(pi/2) q[0];`
+        let params = self.parse_optional_params()?;
+        let args = self.parse_operand_list()?;
+        let end = self.expect(&Token::Semicolon)?;
+        Ok(Stmt::GateCall {
+            name,
+            modifiers: Vec::new(),
+            params,
+            args,
+            span: Self::merge(&start, &end),
+        })
+    }
 
-            let mut exprs = Vec::new();
-            if !self.check(&Token::RParen {
-                exprs.push(self.parese_expr()?);
+    /// Try to parse `(expr, expr, ...)` parameter list.
+    /// Returns empty vec if no `(` present.
+    fn parse_optional_params(&mut self) -> Result<Vec<Expr>> {
+        if !self.check(&Token::LParen) {
+            return Ok(Vec::new());
+        }
+        self.advance(); // consume `(`
+
+        let mut exprs = Vec::new();
+        if !self.check(&Token::RParen) {
+            exprs.push(self.parse_expr()?);
+            while self.check(&Token::Comma) {
+                self.advance();
+                exprs.push(self.parse_expr()?);
             }
-        }self.expect(&Token::RParen)?;
+        }
+        self.expect(&Token::RParen)?;
         Ok(exprs)
     }
 
     fn parse_measure_stmt(&mut self) -> Result<Stmt> {
         let start = self.peek_span();
-        self.advance();
+        self.advance(); // consume `measure`
         let qubit = self.parse_operand()?;
         let end = self.expect(&Token::Semicolon)?;
         Ok(Stmt::Measure {
             qubit,
-            target: None, 
+            target: None,
             span: Self::merge(&start, &end),
         })
     }
 
     fn parse_reset_stmt(&mut self) -> Result<Stmt> {
         let start = self.peek_span();
-        self.advance();
+        self.advance(); // consume `reset`
         let target = self.parse_operand()?;
         let end = self.expect(&Token::Semicolon)?;
         Ok(Stmt::Reset {
@@ -475,8 +492,8 @@ impl Parser {
 
     fn parse_barrier_stmt(&mut self) -> Result<Stmt> {
         let start = self.peek_span();
-        self.advance();
-        let target = self.parse_operand_list()?;
+        self.advance(); // consume `barrier`
+        let targets = self.parse_operand_list()?;
         let end = self.expect(&Token::Semicolon)?;
         Ok(Stmt::Barrier {
             targets,
@@ -484,30 +501,71 @@ impl Parser {
         })
     }
 
-    // Expression parse (Pratt / precedence climbing)
-    // Parse a full expression
+    // ── Operands ────────────────────────────────────────────
+
+    fn parse_operand(&mut self) -> Result<GateOperand> {
+        let (name, name_span) = self.expect_ident()?;
+        if self.check(&Token::LBracket) {
+            self.advance();
+            let idx = match self.peek().cloned() {
+                Some(Token::IntLiteral(n)) => {
+                    self.advance();
+                    n
+                }
+                _ => return Err(self.error("expected integer index")),
+            };
+            let end = self.expect(&Token::RBracket)?;
+            Ok(GateOperand {
+                name,
+                index: Some(idx),
+                span: Self::merge(&name_span, &end),
+            })
+        } else {
+            Ok(GateOperand {
+                name,
+                index: None,
+                span: name_span,
+            })
+        }
+    }
+
+    fn parse_operand_list(&mut self) -> Result<Vec<GateOperand>> {
+        let mut ops = Vec::new();
+        // Operand list must start with an identifier.
+        if matches!(self.peek(), Some(Token::Ident(_))) {
+            ops.push(self.parse_operand()?);
+            while self.check(&Token::Comma) {
+                self.advance();
+                ops.push(self.parse_operand()?);
+            }
+        }
+        Ok(ops)
+    }
+
+    // ── Expression parser (Pratt / precedence climbing) ─────
+
     fn parse_expr(&mut self) -> Result<Expr> {
         self.parse_expr_bp(0)
     }
 
-    // Pratt parser: parse expression with minimum binding power `min_bp`
-    fn parse_expr_bp(&mut self, mind_bp: u8) -> Result<Expr> {
+    /// Pratt parser: parse expression with minimum binding power `min_bp`.
+    fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expr> {
         // Prefix / atom
-        let must lhs = self.parse_prefix()?;
+        let mut lhs = self.parse_prefix()?;
 
         // Infix loop
         loop {
-            let (op, bp) = match self.peek() { 
-                Some(Token::Plus) => (BinOp::Add, (1, 2)),
-                Some(Token::Minus) => (BinOp::Sub, (1, 2)),
-                Some(Token::Star) => (BinOp:: Mul, (3, 4)),
-                Some(Token::Slash) = > (BinOp::Div, (3, 4)),
-                Some(Token::Doublestar => (Bin::Pow, (6, 5))), // right-assoction
+            let (op, l_bp, r_bp) = match self.peek() {
+                Some(Token::Plus) => (BinOp::Add, 1, 2),
+                Some(Token::Minus) => (BinOp::Sub, 1, 2),
+                Some(Token::Star) => (BinOp::Mul, 3, 4),
+                Some(Token::Slash) => (BinOp::Div, 3, 4),
+                Some(Token::DoubleStar) => (BinOp::Pow, 6, 5), // right-associative
+                _ => break,
             };
 
-            let (1_bp, r_bp) = bp;
-            if l_bp M min_bp {
-                breakl
+            if l_bp < min_bp {
+                break;
             }
 
             self.advance(); // consume operator
@@ -524,12 +582,14 @@ impl Parser {
         Ok(lhs)
     }
 
-    // Parse a prefix expression or atom
+    /// Parse a prefix expression or atom.
     fn parse_prefix(&mut self) -> Result<Expr> {
         match self.peek().cloned() {
             // Unary minus
             Some(Token::Minus) => {
-                let start = self.parse_expr_bp(5)?; // higher than mul/div
+                let start = self.peek_span();
+                self.advance();
+                let operand = self.parse_expr_bp(5)?; // higher than mul/div
                 let span = Self::merge(&start, operand.span());
                 Ok(Expr::Neg(Box::new(operand), span))
             }
@@ -540,8 +600,151 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(inner)
             }
-            // Constants
+            // Integer literal
+            Some(Token::IntLiteral(n)) => {
+                let span = self.peek_span();
+                self.advance();
+                Ok(Expr::IntLit(n, span))
+            }
+            // Float literal
+            Some(Token::FloatLiteral(f)) => {
+                let span = self.peek_span();
+                self.advance();
+                Ok(Expr::FloatLit(f, span))
+            }
+            // Identifier — could be a built-in constant or a parameter name
+            Some(Token::Ident(ref name)) => {
+                let span = self.peek_span();
+                let name = name.clone();
+                self.advance();
+                match name.as_str() {
+                    "pi" => Ok(Expr::Const(ConstKind::Pi, span)),
+                    "tau" => Ok(Expr::Const(ConstKind::Tau, span)),
+                    "euler" => Ok(Expr::Const(ConstKind::Euler, span)),
+                    _ => Ok(Expr::Ident(name, span)),
+                }
+            }
+            _ => Err(self.error("expected expression")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_bell_pair() {
+        let source = "OPENQASM 3.0; qubit[2] q; bit[2] c; h q[0]; cx q[0], q[1]; c = measure q;";
+        let mut parser = Parser::new(source);
+        let program = parser.parse().expect("parse failed");
+        assert_eq!(program.statements.len(), 6);
+    }
+
+    #[test]
+    fn parse_scalar_qubit() {
+        let source = "OPENQASM 3.0; qubit q; h q;";
+        let mut parser = Parser::new(source);
+        let program = parser.parse().expect("parse failed");
+        assert_eq!(program.statements.len(), 2);
+    }
+
+    #[test]
+    fn parse_measure_and_reset() {
+        let source = "OPENQASM 3.0; qubit q; measure q; reset q;";
+        let mut parser = Parser::new(source);
+        let program = parser.parse().expect("parse failed");
+        assert_eq!(program.statements.len(), 3);
+    }
+
+    #[test]
+    fn parse_barrier() {
+        let source = "OPENQASM 3.0; qubit[3] q; barrier q[0], q[1], q[2];";
+        let mut parser = Parser::new(source);
+        let program = parser.parse().expect("parse failed");
+        assert_eq!(program.statements.len(), 2);
+    }
+
+    #[test]
+    fn parse_parameterized_gate() {
+        let source = "OPENQASM 3.0; qubit q; rx(pi/2) q;";
+        let mut parser = Parser::new(source);
+        let program = parser.parse().expect("parse failed");
+        assert_eq!(program.statements.len(), 2);
+        match &program.statements[1] {
+            Stmt::GateCall { name, params, .. } => {
+                assert_eq!(name, "rx");
+                assert_eq!(params.len(), 1);
+            }
+            _ => panic!("expected gate call"),
         }
     }
 
+    #[test]
+    fn parse_gate_def() {
+        let source = "OPENQASM 3.0; gate h q { u3(pi/2, 0, pi) q; }";
+        let mut parser = Parser::new(source);
+        let program = parser.parse().expect("parse failed");
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Stmt::GateDef {
+                name,
+                params,
+                qparams,
+                body,
+                ..
+            } => {
+                assert_eq!(name, "h");
+                assert!(params.is_empty());
+                assert_eq!(qparams, &["q"]);
+                assert_eq!(body.len(), 1);
+            }
+            _ => panic!("expected gate def"),
+        }
+    }
+
+    #[test]
+    fn parse_modified_gate() {
+        let source = "OPENQASM 3.0; qubit[2] q; ctrl @ x q[0], q[1];";
+        let mut parser = Parser::new(source);
+        let program = parser.parse().expect("parse failed");
+        assert_eq!(program.statements.len(), 2);
+        match &program.statements[1] {
+            Stmt::GateCall {
+                name, modifiers, ..
+            } => {
+                assert_eq!(name, "x");
+                assert_eq!(modifiers.len(), 1);
+            }
+            _ => panic!("expected modified gate call"),
+        }
+    }
+
+    #[test]
+    fn parse_expression_precedence() {
+        // pi/2 + 1 should parse as (pi/2) + 1, not pi/(2+1)
+        let source = "OPENQASM 3.0; qubit q; rx(pi/2 + 1) q;";
+        let mut parser = Parser::new(source);
+        let program = parser.parse().expect("parse failed");
+        match &program.statements[1] {
+            Stmt::GateCall { params, .. } => {
+                assert_eq!(params.len(), 1);
+                match &params[0] {
+                    Expr::BinOp {
+                        op: BinOp::Add, ..
+                    } => {} // correct: top level is Add
+                    other => panic!("expected Add at top, got {:?}", other),
+                }
+            }
+            _ => panic!("expected gate call"),
+        }
+    }
+
+    #[test]
+    fn parse_qreg_creg_compat() {
+        let source = "OPENQASM 3.0; qreg q[2]; creg c[2]; h q[0];";
+        let mut parser = Parser::new(source);
+        let program = parser.parse().expect("parse failed");
+        assert_eq!(program.statements.len(), 3);
+    }
 }

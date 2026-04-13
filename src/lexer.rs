@@ -56,6 +56,16 @@ pub enum Token {
     #[token("qreg")]
     Qreg,
 
+    // === Gate modifiers ===
+    #[token("ctrl")]
+    Ctrl,
+    #[token("negctrl")]
+    NegCtrl,
+    #[token("inv")]
+    Inv,
+    #[token("pow")]
+    Pow,
+
     // === Literals ===
     #[regex(r"[0-9]+\.[0-9]*([eE][+-]?[0-9]+)?", |lex| lex.slice().parse::<f64>().ok())]
     FloatLiteral(f64),

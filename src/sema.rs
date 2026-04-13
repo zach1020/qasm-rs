@@ -94,6 +94,10 @@ pub fn analyze(program: &Program) -> Vec<Diagnostic> {
                     check_operand(&symbols, &mut diags, op, Some(SymbolKind::Qubit));
                 }
             }
+            Stmt::GateDef { .. } => {
+                // Gate definitions introduce their own scope; skip for now.
+                // TODO: validate gate body references against qparams.
+            }
             Stmt::Measure { qubit, target, .. } => {
                 check_operand(&symbols, &mut diags, qubit, Some(SymbolKind::Qubit));
                 if let Some(t) = target {
