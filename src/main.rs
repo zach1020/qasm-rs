@@ -1,6 +1,9 @@
 mod ast;
 mod codegen;
+mod ir;
 mod lexer;
+mod lower;
+mod opt;
 mod parser;
 mod sema;
 mod span;
@@ -90,8 +93,32 @@ fn compile(name: &str, source: &str) {
         return;
     }
 
-    // 4. Codegen — emit canonical QASM.
-    let output = codegen::emit(&program);
+    // 4. Lower to IR.
+    let mut dag = match lower::lower(&program) {
+        Ok(d) => d,
+        Err(e) => {
+            println!("  ✗ {}\n", e);
+            return;
+        }
+    };
+
+    println!("  ✓ lowered to DAG: {} qubits, {} gates, depth {}",
+        dag.num_qubits, dag.gate_count(), dag.depth());
+    println!("{}", dag);
+
+    // 5. Optimize.
+    let before = dag.gate_count();
+    let stats = opt::cancel_inverses(&mut dag);
+    if stats.gates_removed > 0 {
+        println!("  ⚡ optimization: removed {} gates ({} → {})",
+            stats.gates_removed, before, dag.gate_count());
+        println!("{}", dag);
+    } else {
+        println!("  ⚡ optimization: no cancellations found");
+    }
+
+    // 6. Emit optimized QASM.
+    let output = dag.emit_qasm();
     println!("  ✓ emitted QASM:\n");
     for line in output.lines() {
         println!("    {}", line);
@@ -100,7 +127,7 @@ fn compile(name: &str, source: &str) {
 }
 
 fn main() {
-    // 1. Valid Bell pair — full pipeline.
+    // 1. Bell pair — full pipeline.
     compile(
         "bell.qasm",
         "OPENQASM 3.0;\n\
@@ -111,47 +138,42 @@ fn main() {
          c = measure q;\n",
     );
 
-    // 2. Gate definitions and modifiers.
+    // 2. Redundant gates — optimization demo.
     compile(
-        "gates.qasm",
+        "redundant.qasm",
         "OPENQASM 3.0;\n\
-         gate rx(theta) q {\n\
-           U(theta, -pi/2, pi/2) q;\n\
-         }\n\
-         gate cx c, t {\n\
-           ctrl @ x c, t;\n\
-         }\n\
          qubit[2] q;\n\
-         rx(pi/2) q[0];\n\
+         bit[2] c;\n\
+         h q[0];\n\
+         x q[0];\n\
+         x q[0];\n\
          cx q[0], q[1];\n\
-         inv @ rx(pi/2) q[0];\n",
+         c = measure q;\n",
     );
 
-    // 3. Classical control flow.
+    // 3. Cascading cancellation: h·x·x·h → empty.
     compile(
-        "classical.qasm",
+        "cascade.qasm",
         "OPENQASM 3.0;\n\
          qubit q;\n\
-         bit c;\n\
-         int count = 0;\n\
          h q;\n\
-         c = measure q;\n\
-         if (c == 1) {\n\
-           count += 1;\n\
-         }\n",
+         x q;\n\
+         x q;\n\
+         h q;\n",
     );
 
-    // 4. For loop.
+    // 4. CX·CX cancellation.
     compile(
-        "for_loop.qasm",
+        "cx_cancel.qasm",
         "OPENQASM 3.0;\n\
-         qubit[4] q;\n\
-         for int i in [0:4] {\n\
-           h q;\n\
-         }\n",
+         qubit[2] q;\n\
+         h q[0];\n\
+         cx q[0], q[1];\n\
+         cx q[0], q[1];\n\
+         h q[0];\n",
     );
 
-    // 5. Use after measurement — no-cloning violation.
+    // 5. Use after measurement — error demo.
     compile(
         "use_after_measure.qasm",
         "OPENQASM 3.0;\n\
@@ -162,43 +184,7 @@ fn main() {
          cx q[0], q[1];\n",
     );
 
-    // 6. Conservative linearity through if-branch.
-    compile(
-        "conservative_branch.qasm",
-        "OPENQASM 3.0;\n\
-         qubit q;\n\
-         bit c;\n\
-         int x = 0;\n\
-         if (x == 0) {\n\
-           c = measure q;\n\
-         }\n\
-         h q;\n",
-    );
-
-    // 7. Reset clears measured state.
-    compile(
-        "reset_ok.qasm",
-        "OPENQASM 3.0;\n\
-         qubit q;\n\
-         bit c;\n\
-         h q;\n\
-         measure q;\n\
-         reset q;\n\
-         h q;\n",
-    );
-
-    // 8. Gate arity mismatch.
-    compile(
-        "bad_arity.qasm",
-        "OPENQASM 3.0;\n\
-         gate rx(theta) q {\n\
-           U(theta, 0, 0) q;\n\
-         }\n\
-         qubit q;\n\
-         rx(1, 2) q;\n",
-    );
-
-    // 9. Undeclared + out of bounds.
+    // 6. Undeclared + out of bounds — error demo.
     compile(
         "bad_refs.qasm",
         "OPENQASM 3.0;\n\

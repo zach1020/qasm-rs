@@ -32,9 +32,26 @@ Source (.qasm)
 └────┬─────┘     through branches (if/else, for, while)
      │
      ▼
-┌─────────┐   Pretty-printer emitting canonical OpenQASM 3.
-│ Codegen  │   Round-trip tested: parse → emit → re-parse
-└──────────┘   produces structurally identical ASTs.
+┌─────────┐   Translate AST to a directed acyclic graph.
+│  Lower   │   Resolves qubit names to wire indices,
+└────┬─────┘   threads wires through gate nodes.
+     │
+     ▼
+┌─────────┐   DAG-based circuit IR with In/Out boundary
+│   IR     │   nodes per wire. Supports topological
+│  (DAG)   │   traversal, depth calculation, and node
+└────┬─────┘   removal with automatic rewiring.
+     │
+     ▼
+┌─────────┐   Graph rewrites on the DAG:
+│   Opt    │   • Adjacent inverse cancellation
+│          │     (H·H, X·X, CX·CX, S·S†, T·T†)
+└────┬─────┘   • Fixed-point iteration for cascading
+     │
+     ▼
+┌─────────┐   Emit optimized OpenQASM 3 from the DAG
+│ Codegen  │   via topological traversal.
+└──────────┘
 ```
 
 All errors are rendered with [ariadne](https://github.com/zesterer/ariadne) for precise, colorized source diagnostics with secondary labels pointing to related locations (e.g. "first declared here", "measured here").
@@ -124,6 +141,9 @@ src/
 ├── ast.rs       Span-annotated AST types (quantum + classical)
 ├── parser.rs    Recursive-descent parser with Pratt expression parsing
 ├── sema.rs      Semantic analysis (scoped symbols + linearity checking)
+├── ir.rs        Circuit DAG — nodes are ops, edges are qubit wires
+├── lower.rs     AST → DAG lowering (name resolution to wire indices)
+├── opt.rs       Optimization passes (adjacent inverse cancellation)
 └── codegen.rs   Pretty-printer / QASM emitter with round-trip tests
 ```
 
@@ -135,13 +155,36 @@ src/
 
 **Conservative linearity.** The choice to use union (not intersection) at branch points makes the analysis sound — it will never allow a use-after-measure to slip through. This is the same tradeoff Rust makes: it rejects some programs that would be safe at runtime in exchange for static guarantees.
 
+**Why a DAG?** Quantum circuits have a natural graph structure: operations are nodes, qubit wires are edges, and data dependencies define the partial order. A DAG exposes parallelism (gates on disjoint qubits are unordered), makes optimization passes local graph rewrites, and is the standard IR in quantum compilers (Qiskit's DAGCircuit, tket's Circuit). The long-term goal is to implement QAOA-relevant optimizations — parameter transfer, circuit structure analysis — as graph algorithms on this representation.
+
 **Why ariadne?** Compiler diagnostics are a first-class feature, not an afterthought. Ariadne provides Rust-compiler-quality error rendering with minimal effort.
+
+## Example: gate cancellation optimization
+
+```qasm
+OPENQASM 3.0;
+qubit q;
+h q;
+x q;     // ← X·X cancels
+x q;     // ←
+h q;     // ← H·H cancels (exposed after X·X removed)
+```
+
+The optimizer runs fixed-point iteration — removing X·X exposes the H·H pair behind it, which is then also removed. The result is an empty circuit. This cascading behavior is a natural property of the DAG representation.
 
 ## Roadmap
 
-- [ ] Function definitions (`def`)
-- [ ] IR lowering — translate AST to a DAG-based circuit representation
-- [ ] Circuit optimization passes (gate cancellation, commutation analysis)
+- [x] Lexer (logos-based tokenizer with spans)
+- [x] Parser (recursive descent + Pratt expressions)
+- [x] Semantic analysis (scoped symbols, linearity)
+- [x] Gate definitions and modifiers
+- [x] Classical control flow (if/else, for, while)
+- [x] IR lowering (AST → circuit DAG)
+- [x] Adjacent inverse gate cancellation
+- [ ] Gate commutation analysis
+- [ ] Template-based peephole optimization
+- [ ] Function definitions (`def`) and inlining
+- [ ] Basis gate decomposition
 - [ ] Encode qubit linearity into Rust's type system via generics
 
 ## License
