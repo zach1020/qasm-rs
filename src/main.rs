@@ -100,7 +100,7 @@ fn compile(name: &str, source: &str) {
 }
 
 fn main() {
-    // Valid Bell pair — full pipeline.
+    // 1. Valid Bell pair — full pipeline.
     compile(
         "bell.qasm",
         "OPENQASM 3.0;\n\
@@ -111,7 +111,47 @@ fn main() {
          c = measure q;\n",
     );
 
-    // Use after measurement — no-cloning violation.
+    // 2. Gate definitions and modifiers.
+    compile(
+        "gates.qasm",
+        "OPENQASM 3.0;\n\
+         gate rx(theta) q {\n\
+           U(theta, -pi/2, pi/2) q;\n\
+         }\n\
+         gate cx c, t {\n\
+           ctrl @ x c, t;\n\
+         }\n\
+         qubit[2] q;\n\
+         rx(pi/2) q[0];\n\
+         cx q[0], q[1];\n\
+         inv @ rx(pi/2) q[0];\n",
+    );
+
+    // 3. Classical control flow.
+    compile(
+        "classical.qasm",
+        "OPENQASM 3.0;\n\
+         qubit q;\n\
+         bit c;\n\
+         int count = 0;\n\
+         h q;\n\
+         c = measure q;\n\
+         if (c == 1) {\n\
+           count += 1;\n\
+         }\n",
+    );
+
+    // 4. For loop.
+    compile(
+        "for_loop.qasm",
+        "OPENQASM 3.0;\n\
+         qubit[4] q;\n\
+         for int i in [0:4] {\n\
+           h q;\n\
+         }\n",
+    );
+
+    // 5. Use after measurement — no-cloning violation.
     compile(
         "use_after_measure.qasm",
         "OPENQASM 3.0;\n\
@@ -122,7 +162,20 @@ fn main() {
          cx q[0], q[1];\n",
     );
 
-    // Reset clears measured state — should pass.
+    // 6. Conservative linearity through if-branch.
+    compile(
+        "conservative_branch.qasm",
+        "OPENQASM 3.0;\n\
+         qubit q;\n\
+         bit c;\n\
+         int x = 0;\n\
+         if (x == 0) {\n\
+           c = measure q;\n\
+         }\n\
+         h q;\n",
+    );
+
+    // 7. Reset clears measured state.
     compile(
         "reset_ok.qasm",
         "OPENQASM 3.0;\n\
@@ -134,7 +187,18 @@ fn main() {
          h q;\n",
     );
 
-    // Undeclared + out of bounds.
+    // 8. Gate arity mismatch.
+    compile(
+        "bad_arity.qasm",
+        "OPENQASM 3.0;\n\
+         gate rx(theta) q {\n\
+           U(theta, 0, 0) q;\n\
+         }\n\
+         qubit q;\n\
+         rx(1, 2) q;\n",
+    );
+
+    // 9. Undeclared + out of bounds.
     compile(
         "bad_refs.qasm",
         "OPENQASM 3.0;\n\

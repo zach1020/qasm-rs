@@ -2,7 +2,7 @@
 name = "qasm-rs"
 version = "0.1.0"
 edition = "2021"
-description = "An OpenQASM 3 compiler written in Rust"
+description = "An OpenQASM 3 compiler with compile-time qubit linearity enforcement"
 
 [dependencies]
 logos = "0.14"

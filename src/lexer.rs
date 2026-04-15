@@ -37,6 +37,10 @@ pub enum Token {
     Float,
     #[token("bool")]
     Bool,
+    #[token("true")]
+    True,
+    #[token("false")]
+    False,
     #[token("return")]
     Return,
     #[token("def")]
@@ -106,24 +110,36 @@ pub enum Token {
     RBracket,
     #[token("->")]
     Arrow,
-    #[token("=")]
-    Equals,
+    #[token("+=")]
+    PlusEquals,
+    #[token("-=")]
+    MinusEquals,
     #[token("==")]
     DoubleEquals,
     #[token("!=")]
     NotEquals,
+    #[token("<=")]
+    LessEquals,
+    #[token(">=")]
+    GreaterEquals,
+    #[token("=")]
+    Equals,
+    #[token("<")]
+    Less,
+    #[token(">")]
+    Greater,
     #[token("+")]
     Plus,
     #[token("-")]
     Minus,
+    #[token("**")]
+    DoubleStar,
     #[token("*")]
     Star,
     #[token("/")]
     Slash,
     #[token("@")]
     At,
-    #[token("**")]
-    DoubleStar,
 }
 
 impl std::fmt::Display for Token {
@@ -174,7 +190,6 @@ mod tests {
         assert!(errors.is_empty());
         assert_eq!(tokens[0].node, Token::OpenQasm);
         assert_eq!(tokens[1].node, Token::FloatLiteral(3.0));
-        // Verify spans are non-empty
         assert!(tokens[0].span.start < tokens[0].span.end);
     }
 
@@ -192,6 +207,37 @@ mod tests {
         let source = "qubit # q;";
         let (tokens, errors) = lex(source);
         assert_eq!(errors.len(), 1);
-        assert_eq!(tokens.len(), 3); // qubit, q, ;
+        assert_eq!(tokens.len(), 3);
+    }
+
+    #[test]
+    fn lex_comparison_operators() {
+        let source = "== != < > <= >=";
+        let (tokens, errors) = lex(source);
+        assert!(errors.is_empty());
+        assert_eq!(tokens[0].node, Token::DoubleEquals);
+        assert_eq!(tokens[1].node, Token::NotEquals);
+        assert_eq!(tokens[2].node, Token::Less);
+        assert_eq!(tokens[3].node, Token::Greater);
+        assert_eq!(tokens[4].node, Token::LessEquals);
+        assert_eq!(tokens[5].node, Token::GreaterEquals);
+    }
+
+    #[test]
+    fn lex_compound_assignment() {
+        let source = "+= -=";
+        let (tokens, errors) = lex(source);
+        assert!(errors.is_empty());
+        assert_eq!(tokens[0].node, Token::PlusEquals);
+        assert_eq!(tokens[1].node, Token::MinusEquals);
+    }
+
+    #[test]
+    fn lex_bool_literals() {
+        let source = "true false";
+        let (tokens, errors) = lex(source);
+        assert!(errors.is_empty());
+        assert_eq!(tokens[0].node, Token::True);
+        assert_eq!(tokens[1].node, Token::False);
     }
 }

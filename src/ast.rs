@@ -20,6 +20,18 @@ pub enum Stmt {
         size: Option<u64>,
         span: Span,
     },
+    ClassicalDecl {
+        ty: ClassicalType,
+        name: String,
+        init: Option<Expr>,
+        span: Span,
+    },
+    Assignment {
+        name: String,
+        op: AssignOp,
+        value: Expr,
+        span: Span,
+    },
     GateCall {
         name: String,
         modifiers: Vec<GateModifier>,
@@ -47,6 +59,24 @@ pub enum Stmt {
         targets: Vec<GateOperand>,
         span: Span,
     },
+    If {
+        condition: Expr,
+        then_body: Vec<Stmt>,
+        else_body: Option<Vec<Stmt>>,
+        span: Span,
+    },
+    For {
+        var_name: String,
+        var_ty: ClassicalType,
+        range: ForRange,
+        body: Vec<Stmt>,
+        span: Span,
+    },
+    While {
+        condition: Expr,
+        body: Vec<Stmt>,
+        span: Span,
+    },
 }
 
 impl Stmt {
@@ -54,13 +84,62 @@ impl Stmt {
         match self {
             Stmt::QubitDecl { span, .. }
             | Stmt::BitDecl { span, .. }
+            | Stmt::ClassicalDecl { span, .. }
+            | Stmt::Assignment { span, .. }
             | Stmt::GateCall { span, .. }
             | Stmt::GateDef { span, .. }
             | Stmt::Measure { span, .. }
             | Stmt::Reset { span, .. }
-            | Stmt::Barrier { span, .. } => span,
+            | Stmt::Barrier { span, .. }
+            | Stmt::If { span, .. }
+            | Stmt::For { span, .. }
+            | Stmt::While { span, .. } => span,
         }
     }
+}
+
+/// Classical type specifier.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClassicalType {
+    Int,
+    Float,
+    Bool,
+}
+
+impl std::fmt::Display for ClassicalType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClassicalType::Int => write!(f, "int"),
+            ClassicalType::Float => write!(f, "float"),
+            ClassicalType::Bool => write!(f, "bool"),
+        }
+    }
+}
+
+/// Assignment operator kind.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AssignOp {
+    Assign,    // =
+    AddAssign, // +=
+    SubAssign, // -=
+}
+
+impl std::fmt::Display for AssignOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AssignOp::Assign => write!(f, "="),
+            AssignOp::AddAssign => write!(f, "+="),
+            AssignOp::SubAssign => write!(f, "-="),
+        }
+    }
+}
+
+/// Range expression for `for` loops: `[start:end]` or `[start:step:end]`.
+#[derive(Debug, Clone)]
+pub struct ForRange {
+    pub start: Expr,
+    pub end: Expr,
+    pub step: Option<Expr>,
 }
 
 /// A gate modifier: ctrl @, negctrl @, inv @, pow(k) @
@@ -72,17 +151,24 @@ pub enum GateModifier {
     Pow(Expr, Span),
 }
 
-/// Expression tree for classical parameters (gate angles, etc.)
+/// Expression tree for classical values.
 #[derive(Debug, Clone)]
 pub enum Expr {
     IntLit(u64, Span),
     FloatLit(f64, Span),
+    BoolLit(bool, Span),
     Ident(String, Span),
     /// Built-in constants: pi, tau, euler
     Const(ConstKind, Span),
     Neg(Box<Expr>, Span),
     BinOp {
         op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+        span: Span,
+    },
+    Compare {
+        op: CompareOp,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
         span: Span,
@@ -94,15 +180,17 @@ impl Expr {
         match self {
             Expr::IntLit(_, s)
             | Expr::FloatLit(_, s)
+            | Expr::BoolLit(_, s)
             | Expr::Ident(_, s)
             | Expr::Const(_, s)
             | Expr::Neg(_, s)
-            | Expr::BinOp { span: s, .. } => s,
+            | Expr::BinOp { span: s, .. }
+            | Expr::Compare { span: s, .. } => s,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinOp {
     Add,
     Sub,
@@ -119,6 +207,29 @@ impl std::fmt::Display for BinOp {
             BinOp::Mul => write!(f, "*"),
             BinOp::Div => write!(f, "/"),
             BinOp::Pow => write!(f, "**"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CompareOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl std::fmt::Display for CompareOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompareOp::Eq => write!(f, "=="),
+            CompareOp::Ne => write!(f, "!="),
+            CompareOp::Lt => write!(f, "<"),
+            CompareOp::Le => write!(f, "<="),
+            CompareOp::Gt => write!(f, ">"),
+            CompareOp::Ge => write!(f, ">="),
         }
     }
 }
