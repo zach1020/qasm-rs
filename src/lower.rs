@@ -119,6 +119,31 @@ impl WireMap {
             .ok_or_else(|| err(format!("unresolved bit `{}`", op)))
     }
 
+    /// Resolve a classical bit operand that might be a whole register.
+    /// If no index is given and it's a register, returns all bit IDs.
+    fn resolve_bit_operand(&self, op: &ast::GateOperand) -> Result<Vec<usize>> {
+        if op.index.is_some() {
+            return Ok(vec![self.resolve_bit(op)?]);
+        }
+        // No index — might be scalar or whole register.
+        // Try scalar first.
+        if let Some(&id) = self.bits.get(&(op.name.clone(), None)) {
+            return Ok(vec![id]);
+        }
+        // Try as a register — collect all indices.
+        let mut bits = Vec::new();
+        let mut i = 0u64;
+        while let Some(&id) = self.bits.get(&(op.name.clone(), Some(i))) {
+            bits.push(id);
+            i += 1;
+        }
+        if bits.is_empty() {
+            Err(err(format!("unresolved bit `{}`", op)))
+        } else {
+            Ok(bits)
+        }
+    }
+
     /// Resolve a qubit operand that might be a whole register.
     /// If no index is given and it's a register, returns all wire IDs.
     fn resolve_qubit_operand(&self, op: &ast::GateOperand) -> Result<Vec<usize>> {
@@ -277,13 +302,25 @@ fn lower_stmt(
 
         ast::Stmt::Measure { qubit, target, .. } => {
             let qubit_wires = wires.resolve_qubit_operand(qubit)?;
-            let bit_id = match target {
-                Some(t) => Some(wires.resolve_bit(t)?),
+            let bit_wires = match target {
+                Some(t) => {
+                    let bit_wires = wires.resolve_bit_operand(t)?;
+                    if bit_wires.len() != qubit_wires.len() {
+                        return Err(err(format!(
+                            "measurement target `{}` has {} bit(s), but source `{}` has {} qubit(s)",
+                            t,
+                            bit_wires.len(),
+                            qubit,
+                            qubit_wires.len()
+                        )));
+                    }
+                    Some(bit_wires)
+                }
                 None => None,
             };
             // If measuring a whole register, emit one measure per wire.
             for (i, qw) in qubit_wires.iter().enumerate() {
-                let bw = bit_id.map(|b| b + i);
+                let bw = bit_wires.as_ref().map(|bits| bits[i]);
                 dag.append_measure(*qw, bw);
             }
             Ok(())
@@ -376,6 +413,16 @@ mod tests {
         assert!(qasm.contains("h q[0]"));
         assert!(qasm.contains("cx q[0], q[1]"));
         assert!(qasm.contains("measure"));
+    }
+
+    #[test]
+    fn lower_rejects_mismatched_measure_registers() {
+        let mut parser = Parser::new("OPENQASM 3.0; qubit[2] q; bit c; c = measure q;");
+        let program = parser.parse().expect("parse failed");
+        match lower(&program) {
+            Ok(_) => panic!("lowering should reject mismatched registers"),
+            Err(err) => assert!(err.message.contains("measurement target")),
+        }
     }
 
     #[test]

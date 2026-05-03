@@ -279,8 +279,8 @@ mod tests {
         cancel_inverses(&mut dag);
         let qasm = dag.emit_qasm();
         // x·x removed, h and cx remain.
-        assert!(qasm.contains("h q[0]"));
-        assert!(qasm.contains("cx q[0], q[1]"));
-        assert!(!qasm.contains("x q[0]"));
+        assert!(qasm.lines().any(|line| line == "h q[0];"));
+        assert!(qasm.lines().any(|line| line == "cx q[0], q[1];"));
+        assert!(!qasm.lines().any(|line| line == "x q[0];"));
     }
 }

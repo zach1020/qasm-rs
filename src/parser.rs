@@ -809,7 +809,7 @@ mod tests {
         let source = "OPENQASM 3.0; qubit[2] q; bit[2] c; h q[0]; cx q[0], q[1]; c = measure q;";
         let mut parser = Parser::new(source);
         let program = parser.parse().expect("parse failed");
-        assert_eq!(program.statements.len(), 6);
+        assert_eq!(program.statements.len(), 5);
     }
 
     #[test]

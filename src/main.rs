@@ -1,195 +1,152 @@
-mod ast;
-mod codegen;
-mod ir;
-mod lexer;
-mod lower;
-mod opt;
-mod parser;
-mod sema;
-mod span;
+use std::fs;
+use std::path::PathBuf;
+use std::process::ExitCode;
 
 use ariadne::{Color, Label, Report, ReportKind, Source};
-use parser::Parser;
-use sema::Severity;
+use clap::Parser;
+use qasm_rs::{compile_source, CompileError, CompileOptions};
 
-fn compile(name: &str, source: &str) {
-    println!("── {} ──", name);
+#[derive(Debug, Parser)]
+#[command(
+    name = "qasm-rs",
+    version,
+    about = "Compile and optimize an OpenQASM 3 circuit"
+)]
+struct Args {
+    /// Input OpenQASM 3 source file.
+    input: PathBuf,
 
-    // 1. Lex errors.
-    let (_, lex_errors) = lexer::lex(source);
-    for err_span in &lex_errors {
-        Report::build(ReportKind::Error, name, err_span.start)
-            .with_message("unexpected character")
-            .with_label(
-                Label::new((name, err_span.clone()))
-                    .with_message("this character is not valid in OpenQASM 3")
-                    .with_color(Color::Red),
-            )
-            .finish()
-            .eprint((name, Source::from(source)))
-            .unwrap();
+    /// Write emitted OpenQASM to this file instead of stdout.
+    #[arg(short, long, value_name = "PATH")]
+    emit: Option<PathBuf>,
+
+    /// Skip optimization passes.
+    #[arg(long)]
+    no_optimize: bool,
+
+    /// Print compiler statistics to stderr.
+    #[arg(long)]
+    stats: bool,
+}
+
+fn main() -> ExitCode {
+    let args = Args::parse();
+    let source_name = args.input.display().to_string();
+
+    let source = match fs::read_to_string(&args.input) {
+        Ok(source) => source,
+        Err(err) => {
+            eprintln!("qasm-rs: failed to read {}: {}", source_name, err);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let options = CompileOptions {
+        optimize: !args.no_optimize,
+    };
+
+    let output = match compile_source(&source, options) {
+        Ok(output) => output,
+        Err(err) => {
+            render_compile_error(&source_name, &source, err);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    for diagnostic in output
+        .diagnostics
+        .iter()
+        .filter(|d| matches!(d.severity, qasm_rs::sema::Severity::Warning))
+    {
+        render_sema_diagnostic(&source_name, &source, diagnostic);
     }
 
-    // 2. Parse.
-    let mut parser = Parser::new(source);
-    let program = match parser.parse() {
-        Ok(p) => p,
-        Err(e) => {
-            Report::build(ReportKind::Error, name, e.span.start)
-                .with_message(&e.message)
+    if args.stats {
+        eprintln!(
+            "qasm-rs: qubits={}, bits={}, gates={}, depth={}, gates_removed={}",
+            output.dag.num_qubits,
+            output.dag.num_bits,
+            output.dag.gate_count(),
+            output.dag.depth(),
+            output.gates_removed
+        );
+    }
+
+    if let Some(path) = args.emit {
+        if let Err(err) = fs::write(&path, output.qasm) {
+            eprintln!("qasm-rs: failed to write {}: {}", path.display(), err);
+            return ExitCode::FAILURE;
+        }
+    } else {
+        print!("{}", output.qasm);
+    }
+
+    ExitCode::SUCCESS
+}
+
+fn render_compile_error(file_name: &str, source: &str, err: CompileError) {
+    match err {
+        CompileError::Lex(spans) => {
+            for span in spans {
+                Report::build(ReportKind::Error, file_name, span.start)
+                    .with_message("unexpected character")
+                    .with_label(
+                        Label::new((file_name, span))
+                            .with_message("this character is not valid in OpenQASM 3")
+                            .with_color(Color::Red),
+                    )
+                    .finish()
+                    .eprint((file_name, Source::from(source)))
+                    .unwrap();
+            }
+        }
+        CompileError::Parse(err) => {
+            Report::build(ReportKind::Error, file_name, err.span.start)
+                .with_message(&err.message)
                 .with_label(
-                    Label::new((name, e.span.clone()))
-                        .with_message(&e.message)
+                    Label::new((file_name, err.span.clone()))
+                        .with_message(&err.message)
                         .with_color(Color::Red),
                 )
                 .finish()
-                .eprint((name, Source::from(source)))
+                .eprint((file_name, Source::from(source)))
                 .unwrap();
-            println!();
-            return;
         }
-    };
-
-    // 3. Semantic analysis.
-    let diagnostics = sema::analyze(&program);
-    let has_errors = diagnostics
-        .iter()
-        .any(|d| matches!(d.severity, Severity::Error));
-
-    for diag in &diagnostics {
-        let kind = match diag.severity {
-            Severity::Error => ReportKind::Error,
-            Severity::Warning => ReportKind::Warning,
-        };
-        let color = match diag.severity {
-            Severity::Error => Color::Red,
-            Severity::Warning => Color::Yellow,
-        };
-
-        let mut report = Report::build(kind, name, diag.span.start)
-            .with_message(&diag.message)
-            .with_label(
-                Label::new((name, diag.span.clone()))
-                    .with_message(&diag.message)
-                    .with_color(color),
-            );
-
-        if let Some((note, note_span)) = &diag.secondary {
-            report = report.with_label(
-                Label::new((name, note_span.clone()))
-                    .with_message(note)
-                    .with_color(Color::Blue),
-            );
+        CompileError::Semantic(diagnostics) => {
+            for diagnostic in diagnostics {
+                render_sema_diagnostic(file_name, source, &diagnostic);
+            }
         }
-
-        report
-            .finish()
-            .eprint((name, Source::from(source)))
-            .unwrap();
-    }
-
-    if has_errors {
-        println!("  ✗ {} error(s) — codegen skipped\n", diagnostics.len());
-        return;
-    }
-
-    // 4. Lower to IR.
-    let mut dag = match lower::lower(&program) {
-        Ok(d) => d,
-        Err(e) => {
-            println!("  ✗ {}\n", e);
-            return;
+        CompileError::Lower(err) => {
+            eprintln!("qasm-rs: {}", err);
         }
-    };
-
-    println!("  ✓ lowered to DAG: {} qubits, {} gates, depth {}",
-        dag.num_qubits, dag.gate_count(), dag.depth());
-    println!("{}", dag);
-
-    // 5. Optimize.
-    let before = dag.gate_count();
-    let stats = opt::cancel_inverses(&mut dag);
-    if stats.gates_removed > 0 {
-        println!("  ⚡ optimization: removed {} gates ({} → {})",
-            stats.gates_removed, before, dag.gate_count());
-        println!("{}", dag);
-    } else {
-        println!("  ⚡ optimization: no cancellations found");
     }
-
-    // 6. Emit optimized QASM.
-    let output = dag.emit_qasm();
-    println!("  ✓ emitted QASM:\n");
-    for line in output.lines() {
-        println!("    {}", line);
-    }
-    println!();
 }
 
-fn main() {
-    // 1. Bell pair — full pipeline.
-    compile(
-        "bell.qasm",
-        "OPENQASM 3.0;\n\
-         qubit[2] q;\n\
-         bit[2] c;\n\
-         h q[0];\n\
-         cx q[0], q[1];\n\
-         c = measure q;\n",
-    );
+fn render_sema_diagnostic(file_name: &str, source: &str, diagnostic: &qasm_rs::sema::Diagnostic) {
+    let (kind, color) = match diagnostic.severity {
+        qasm_rs::sema::Severity::Error => (ReportKind::Error, Color::Red),
+        qasm_rs::sema::Severity::Warning => (ReportKind::Warning, Color::Yellow),
+    };
 
-    // 2. Redundant gates — optimization demo.
-    compile(
-        "redundant.qasm",
-        "OPENQASM 3.0;\n\
-         qubit[2] q;\n\
-         bit[2] c;\n\
-         h q[0];\n\
-         x q[0];\n\
-         x q[0];\n\
-         cx q[0], q[1];\n\
-         c = measure q;\n",
-    );
+    let mut report = Report::build(kind, file_name, diagnostic.span.start)
+        .with_message(&diagnostic.message)
+        .with_label(
+            Label::new((file_name, diagnostic.span.clone()))
+                .with_message(&diagnostic.message)
+                .with_color(color),
+        );
 
-    // 3. Cascading cancellation: h·x·x·h → empty.
-    compile(
-        "cascade.qasm",
-        "OPENQASM 3.0;\n\
-         qubit q;\n\
-         h q;\n\
-         x q;\n\
-         x q;\n\
-         h q;\n",
-    );
+    if let Some((note, note_span)) = &diagnostic.secondary {
+        report = report.with_label(
+            Label::new((file_name, note_span.clone()))
+                .with_message(note)
+                .with_color(Color::Blue),
+        );
+    }
 
-    // 4. CX·CX cancellation.
-    compile(
-        "cx_cancel.qasm",
-        "OPENQASM 3.0;\n\
-         qubit[2] q;\n\
-         h q[0];\n\
-         cx q[0], q[1];\n\
-         cx q[0], q[1];\n\
-         h q[0];\n",
-    );
-
-    // 5. Use after measurement — error demo.
-    compile(
-        "use_after_measure.qasm",
-        "OPENQASM 3.0;\n\
-         qubit[2] q;\n\
-         bit[2] c;\n\
-         h q[0];\n\
-         c = measure q;\n\
-         cx q[0], q[1];\n",
-    );
-
-    // 6. Undeclared + out of bounds — error demo.
-    compile(
-        "bad_refs.qasm",
-        "OPENQASM 3.0;\n\
-         qubit[2] q;\n\
-         h r[0];\n\
-         cx q[0], q[5];\n",
-    );
+    report
+        .finish()
+        .eprint((file_name, Source::from(source)))
+        .unwrap();
 }
