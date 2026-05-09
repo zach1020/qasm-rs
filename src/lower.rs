@@ -1,10 +1,9 @@
-//! AST → CircuitDAG lowering.
+//! AST → IR lowering.
 //!
 //! Walks the AST, resolves qubit/bit names to wire indices, and builds
-//! the circuit DAG. Classical declarations and assignments are skipped
-//! (they don't produce circuit operations). Control flow (if/for/while)
-//! is not yet supported at the IR level — the lowering pass errors on
-//! these constructs.
+//! either a straight-line circuit DAG or the high-level IR. HIR preserves
+//! classical control flow and lowers straight-line quantum regions inside
+//! that structure to DAGs.
 //!
 //! Gate definitions are recorded but not inlined — the DAG preserves
 //! the original gate calls. A future pass could inline/decompose gates
@@ -12,8 +11,8 @@
 
 use std::collections::HashMap;
 
-use crate::ast;
 use crate::ir::*;
+use crate::{ast, hir};
 
 // ── Lowering errors ─────────────────────────────────────────
 
@@ -259,22 +258,133 @@ pub fn lower(program: &ast::Program) -> Result<CircuitDAG> {
     Ok(dag)
 }
 
-fn lower_stmts(
-    stmts: &[ast::Stmt],
-    wires: &WireMap,
-    dag: &mut CircuitDAG,
-) -> Result<()> {
+/// Lower a type-checked AST into HIR.
+pub fn lower_hir(program: &ast::Program) -> Result<hir::HirProgram> {
+    let mut wires = WireMap::new();
+    collect_wire_decls(&program.statements, &mut wires);
+
+    let statements = lower_hir_stmts(&program.statements, &wires)?;
+
+    Ok(hir::HirProgram {
+        version: program.version.clone(),
+        statements,
+        num_qubits: wires.next_qubit,
+        num_bits: wires.next_bit,
+    })
+}
+
+fn collect_wire_decls(stmts: &[ast::Stmt], wires: &mut WireMap) {
+    for stmt in stmts {
+        match stmt {
+            ast::Stmt::QubitDecl { name, size, .. } => {
+                wires.add_qubit_register(name, *size);
+            }
+            ast::Stmt::BitDecl { name, size, .. } => {
+                wires.add_bit_register(name, *size);
+            }
+            ast::Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_wire_decls(then_body, wires);
+                if let Some(else_body) = else_body {
+                    collect_wire_decls(else_body, wires);
+                }
+            }
+            ast::Stmt::For { body, .. } | ast::Stmt::While { body, .. } => {
+                collect_wire_decls(body, wires);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn new_region_dag(wires: &WireMap) -> CircuitDAG {
+    let mut dag = CircuitDAG::new(wires.next_qubit, wires.next_bit);
+    dag.qubit_names = wires.qubit_names.clone();
+    dag.bit_names = wires.bit_names.clone();
+    dag
+}
+
+fn lower_hir_stmts(stmts: &[ast::Stmt], wires: &WireMap) -> Result<Vec<hir::HirStmt>> {
+    let mut out = Vec::new();
+    let mut current_dag: Option<CircuitDAG> = None;
+
+    for stmt in stmts {
+        if is_circuit_stmt(stmt) {
+            let dag = current_dag.get_or_insert_with(|| new_region_dag(wires));
+            lower_stmt(stmt, wires, dag)?;
+            continue;
+        }
+
+        flush_region(&mut current_dag, &mut out);
+
+        match stmt {
+            ast::Stmt::If {
+                condition,
+                then_body,
+                else_body,
+                ..
+            } => out.push(hir::HirStmt::If {
+                condition: condition.clone(),
+                then_body: lower_hir_stmts(then_body, wires)?,
+                else_body: else_body
+                    .as_deref()
+                    .map(|body| lower_hir_stmts(body, wires))
+                    .transpose()?,
+            }),
+            ast::Stmt::For {
+                var_name,
+                var_ty,
+                range,
+                body,
+                ..
+            } => out.push(hir::HirStmt::For {
+                var_name: var_name.clone(),
+                var_ty: *var_ty,
+                range: range.clone(),
+                body: lower_hir_stmts(body, wires)?,
+            }),
+            ast::Stmt::While {
+                condition, body, ..
+            } => out.push(hir::HirStmt::While {
+                condition: condition.clone(),
+                body: lower_hir_stmts(body, wires)?,
+            }),
+            _ => out.push(hir::HirStmt::Ast(stmt.clone())),
+        }
+    }
+
+    flush_region(&mut current_dag, &mut out);
+    Ok(out)
+}
+
+fn is_circuit_stmt(stmt: &ast::Stmt) -> bool {
+    matches!(
+        stmt,
+        ast::Stmt::GateCall { .. }
+            | ast::Stmt::Measure { .. }
+            | ast::Stmt::Reset { .. }
+            | ast::Stmt::Barrier { .. }
+    )
+}
+
+fn flush_region(current_dag: &mut Option<CircuitDAG>, out: &mut Vec<hir::HirStmt>) {
+    if let Some(mut dag) = current_dag.take() {
+        dag.finalize();
+        out.push(hir::HirStmt::Circuit(dag));
+    }
+}
+
+fn lower_stmts(stmts: &[ast::Stmt], wires: &WireMap, dag: &mut CircuitDAG) -> Result<()> {
     for stmt in stmts {
         lower_stmt(stmt, wires, dag)?;
     }
     Ok(())
 }
 
-fn lower_stmt(
-    stmt: &ast::Stmt,
-    wires: &WireMap,
-    dag: &mut CircuitDAG,
-) -> Result<()> {
+fn lower_stmt(stmt: &ast::Stmt, wires: &WireMap, dag: &mut CircuitDAG) -> Result<()> {
     match stmt {
         // Declarations are handled in the first pass.
         ast::Stmt::QubitDecl { .. }
@@ -344,12 +454,10 @@ fn lower_stmt(
         }
 
         // Control flow: not yet lowered to IR.
-        ast::Stmt::If { .. } | ast::Stmt::For { .. } | ast::Stmt::While { .. } => {
-            Err(err(
-                "classical control flow is not yet supported in IR lowering — \
+        ast::Stmt::If { .. } | ast::Stmt::For { .. } | ast::Stmt::While { .. } => Err(err(
+            "classical control flow is not yet supported in IR lowering — \
                  only straight-line quantum circuits can be lowered",
-            ))
-        }
+        )),
     }
 }
 
@@ -398,9 +506,7 @@ mod tests {
     fn lower_preserves_depth() {
         // h q[0]; x q[1]; are parallel → depth 1
         // cx q[0], q[1]; depends on both → depth 2
-        let dag = lower_source(
-            "OPENQASM 3.0; qubit[2] q; h q[0]; x q[1]; cx q[0], q[1];",
-        );
+        let dag = lower_source("OPENQASM 3.0; qubit[2] q; h q[0]; x q[1]; cx q[0], q[1];");
         assert_eq!(dag.depth(), 2);
     }
 
@@ -427,9 +533,7 @@ mod tests {
 
     #[test]
     fn lower_rejects_control_flow() {
-        let mut parser = Parser::new(
-            "OPENQASM 3.0; qubit q; int x = 0; if (x == 0) { h q; }",
-        );
+        let mut parser = Parser::new("OPENQASM 3.0; qubit q; int x = 0; if (x == 0) { h q; }");
         let program = parser.parse().expect("parse failed");
         assert!(lower(&program).is_err());
     }

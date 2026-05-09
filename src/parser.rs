@@ -175,10 +175,9 @@ impl Parser {
             Some(Token::If) => self.parse_if_stmt(),
             Some(Token::For) => self.parse_for_stmt(),
             Some(Token::While) => self.parse_while_stmt(),
-            Some(Token::Ctrl)
-            | Some(Token::NegCtrl)
-            | Some(Token::Inv)
-            | Some(Token::Pow) => self.parse_modified_gate_call(),
+            Some(Token::Ctrl) | Some(Token::NegCtrl) | Some(Token::Inv) | Some(Token::Pow) => {
+                self.parse_modified_gate_call()
+            }
             Some(Token::Ident(_)) => self.parse_ident_stmt(),
             _ => Err(self.error("unexpected token at statement level")),
         }
@@ -437,10 +436,9 @@ impl Parser {
 
     fn parse_gate_body_stmt(&mut self) -> Result<Stmt> {
         match self.peek() {
-            Some(Token::Ctrl)
-            | Some(Token::NegCtrl)
-            | Some(Token::Inv)
-            | Some(Token::Pow) => self.parse_modified_gate_call(),
+            Some(Token::Ctrl) | Some(Token::NegCtrl) | Some(Token::Inv) | Some(Token::Pow) => {
+                self.parse_modified_gate_call()
+            }
             Some(Token::Ident(_)) => self.parse_gate_call_stmt(),
             _ => Err(self.error("only gate calls are allowed inside a gate body")),
         }
@@ -900,9 +898,7 @@ mod tests {
             Stmt::GateCall { params, .. } => {
                 assert_eq!(params.len(), 1);
                 match &params[0] {
-                    Expr::BinOp {
-                        op: BinOp::Add, ..
-                    } => {}
+                    Expr::BinOp { op: BinOp::Add, .. } => {}
                     other => panic!("expected Add at top, got {:?}", other),
                 }
             }
@@ -951,7 +947,8 @@ mod tests {
 
     #[test]
     fn parse_if_else() {
-        let source = "OPENQASM 3.0; qubit q; bit c; c = measure q; if (c == 1) { h q; } else { x q; }";
+        let source =
+            "OPENQASM 3.0; qubit q; bit c; c = measure q; if (c == 1) { h q; } else { x q; }";
         let mut parser = Parser::new(source);
         let program = parser.parse().expect("parse failed");
         assert_eq!(program.statements.len(), 4);

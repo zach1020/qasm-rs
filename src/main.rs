@@ -64,10 +64,10 @@ fn main() -> ExitCode {
     if args.stats {
         eprintln!(
             "qasm-rs: qubits={}, bits={}, gates={}, depth={}, gates_removed={}",
-            output.dag.num_qubits,
-            output.dag.num_bits,
-            output.dag.gate_count(),
-            output.dag.depth(),
+            output.hir.num_qubits,
+            output.hir.num_bits,
+            output.hir.gate_count(),
+            output.hir.depth(),
             output.gates_removed
         );
     }

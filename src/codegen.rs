@@ -17,13 +17,13 @@ pub fn emit(program: &Program) -> String {
     out
 }
 
-fn indent(out: &mut String, depth: usize) {
+pub(crate) fn indent(out: &mut String, depth: usize) {
     for _ in 0..depth {
         out.push_str("  ");
     }
 }
 
-fn emit_stmt(out: &mut String, stmt: &Stmt, depth: usize) {
+pub(crate) fn emit_stmt(out: &mut String, stmt: &Stmt, depth: usize) {
     indent(out, depth);
     match stmt {
         Stmt::QubitDecl { name, size, .. } => {
@@ -51,7 +51,9 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, depth: usize) {
             out.push_str(";\n");
         }
 
-        Stmt::Assignment { name, op, value, .. } => {
+        Stmt::Assignment {
+            name, op, value, ..
+        } => {
             out.push_str(&format!("{} {} ", name, op));
             emit_expr(out, value);
             out.push_str(";\n");
@@ -230,7 +232,7 @@ fn emit_modifier(out: &mut String, m: &GateModifier) {
     }
 }
 
-fn emit_expr(out: &mut String, expr: &Expr) {
+pub(crate) fn emit_expr(out: &mut String, expr: &Expr) {
     match expr {
         Expr::IntLit(n, _) => out.push_str(&n.to_string()),
         Expr::FloatLit(f, _) => out.push_str(&format!("{}", f)),
@@ -289,10 +291,9 @@ mod tests {
         let prog1 = p1.parse().expect("initial parse failed");
         let emitted = emit(&prog1);
         let mut p2 = Parser::new(&emitted);
-        let prog2 = p2.parse().expect(&format!(
-            "re-parse of emitted code failed.\nEmitted:\n{}",
-            emitted
-        ));
+        let prog2 = p2
+            .parse()
+            .unwrap_or_else(|_| panic!("re-parse of emitted code failed.\nEmitted:\n{}", emitted));
         assert_eq!(prog1.statements.len(), prog2.statements.len());
     }
 

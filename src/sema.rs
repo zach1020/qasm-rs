@@ -184,12 +184,12 @@ impl SemaContext {
 
         // Kind mismatch.
         if let Some(expected) = expected_kind {
-            let ok = match (&expected, &sym.kind) {
-                (SymbolKind::Qubit, SymbolKind::Qubit) => true,
-                (SymbolKind::Qubit, SymbolKind::GateQubit) => true,
-                (SymbolKind::Bit, SymbolKind::Bit) => true,
-                _ => false,
-            };
+            let ok = matches!(
+                (&expected, &sym.kind),
+                (SymbolKind::Qubit, SymbolKind::Qubit)
+                    | (SymbolKind::Qubit, SymbolKind::GateQubit)
+                    | (SymbolKind::Bit, SymbolKind::Bit)
+            );
             if !ok {
                 let expected_str = match expected {
                     SymbolKind::Qubit => "qubit",
@@ -306,11 +306,9 @@ impl SemaContext {
     }
 
     fn clear_measured(&mut self, target: &GateOperand) {
-        self.measured
-            .remove(&(target.name.clone(), target.index));
+        self.measured.remove(&(target.name.clone(), target.index));
         if target.index.is_none() {
-            self.measured
-                .retain(|(name, _), _| name != &target.name);
+            self.measured.retain(|(name, _), _| name != &target.name);
         }
     }
 
@@ -333,7 +331,10 @@ impl SemaContext {
             }
 
             Stmt::ClassicalDecl {
-                ty, name, init, span,
+                ty,
+                name,
+                init,
+                span,
             } => {
                 self.declare(name, SymbolKind::Classical(*ty), None, span);
                 if let Some(expr) = init {
@@ -341,7 +342,9 @@ impl SemaContext {
                 }
             }
 
-            Stmt::Assignment { name, value, span, .. } => {
+            Stmt::Assignment {
+                name, value, span, ..
+            } => {
                 if self.symbols.get(name).is_none() {
                     self.diags.push(Diagnostic::error(
                         format!("`{}` is not declared", name),
@@ -364,7 +367,9 @@ impl SemaContext {
                         self.diags.push(Diagnostic::error_with_note(
                             format!(
                                 "gate `{}` expects {} parameter(s), got {}",
-                                name, sig.param_count, params.len()
+                                name,
+                                sig.param_count,
+                                params.len()
                             ),
                             span.clone(),
                             format!("`{}` defined here", name),
@@ -375,7 +380,9 @@ impl SemaContext {
                         self.diags.push(Diagnostic::error_with_note(
                             format!(
                                 "gate `{}` expects {} qubit(s), got {}",
-                                name, sig.qubit_count, args.len()
+                                name,
+                                sig.qubit_count,
+                                args.len()
                             ),
                             span.clone(),
                             format!("`{}` defined here", name),
@@ -443,7 +450,11 @@ impl SemaContext {
                 self.symbols.pop_scope();
             }
 
-            Stmt::Measure { qubit, target, span } => {
+            Stmt::Measure {
+                qubit,
+                target,
+                span,
+            } => {
                 self.check_operand(qubit, Some(SymbolKind::Qubit));
                 if let Some(t) = target {
                     self.check_operand(t, Some(SymbolKind::Bit));
@@ -664,18 +675,14 @@ mod tests {
 
     #[test]
     fn use_after_measure() {
-        let diags = analyze_source(
-            "OPENQASM 3.0; qubit[2] q; bit[2] c; c = measure q; h q[0];",
-        );
+        let diags = analyze_source("OPENQASM 3.0; qubit[2] q; bit[2] c; c = measure q; h q[0];");
         assert_eq!(errors(&diags).len(), 1);
         assert!(errors(&diags)[0].message.contains("after measurement"));
     }
 
     #[test]
     fn reset_clears_measured() {
-        let diags = analyze_source(
-            "OPENQASM 3.0; qubit q; bit c; measure q; reset q; h q;",
-        );
+        let diags = analyze_source("OPENQASM 3.0; qubit q; bit c; measure q; reset q; h q;");
         assert!(
             errors(&diags).is_empty(),
             "reset should clear measured state: {:?}",
@@ -686,9 +693,8 @@ mod tests {
     #[test]
     fn use_after_measure_partial_reset() {
         // Measure whole register, reset only q[0], use q[1] → error.
-        let diags = analyze_source(
-            "OPENQASM 3.0; qubit[2] q; bit c; measure q; reset q[0]; h q[1];",
-        );
+        let diags =
+            analyze_source("OPENQASM 3.0; qubit[2] q; bit c; measure q; reset q[0]; h q[1];");
         assert_eq!(errors(&diags).len(), 1);
     }
 
@@ -715,7 +721,8 @@ mod tests {
         );
         let errs = errors(&diags);
         assert!(
-            errs.iter().any(|d| d.message.contains("not declared") && d.message.contains("theta")),
+            errs.iter()
+                .any(|d| d.message.contains("not declared") && d.message.contains("theta")),
             "theta should not be in scope: {:?}",
             errs
         );
@@ -723,9 +730,7 @@ mod tests {
 
     #[test]
     fn duplicate_gate_def() {
-        let diags = analyze_source(
-            "OPENQASM 3.0; gate h q { } gate h q { }",
-        );
+        let diags = analyze_source("OPENQASM 3.0; gate h q { } gate h q { }");
         let errs = errors(&diags);
         assert!(
             errs.iter().any(|d| d.message.contains("already defined")),
@@ -736,9 +741,7 @@ mod tests {
 
     #[test]
     fn classical_decl_and_assignment() {
-        let diags = analyze_source(
-            "OPENQASM 3.0; int x = 42; x = 10; x += 1;",
-        );
+        let diags = analyze_source("OPENQASM 3.0; int x = 42; x = 10; x += 1;");
         assert!(errors(&diags).is_empty(), "expected no errors: {:?}", diags);
     }
 
@@ -752,14 +755,13 @@ mod tests {
     #[test]
     fn for_loop_scoping() {
         // Loop variable `i` should not be visible after the loop.
-        let diags = analyze_source(
-            "OPENQASM 3.0; qubit[4] q; for int i in [0:4] { h q; } i = 5;",
-        );
+        let diags = analyze_source("OPENQASM 3.0; qubit[4] q; for int i in [0:4] { h q; } i = 5;");
         // `i` assignment after loop should fail — not in scope, and not declared
         // as classical. We expect an error about `i`.
         let errs = errors(&diags);
         assert!(
-            errs.iter().any(|d| d.message.contains("not declared") || d.message.contains("`i`")),
+            errs.iter()
+                .any(|d| d.message.contains("not declared") || d.message.contains("`i`")),
             "expected scoping error for `i`: {:?}",
             errs
         );
@@ -810,9 +812,7 @@ mod tests {
 
     #[test]
     fn expr_undeclared_ident() {
-        let diags = analyze_source(
-            "OPENQASM 3.0; int x = y + 1;",
-        );
+        let diags = analyze_source("OPENQASM 3.0; int x = y + 1;");
         let errs = errors(&diags);
         assert!(
             errs.iter().any(|d| d.message.contains("`y`")),

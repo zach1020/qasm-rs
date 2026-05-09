@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod codegen;
+pub mod hir;
 pub mod ir;
 pub mod lexer;
 pub mod lower;
@@ -23,7 +24,7 @@ impl Default for CompileOptions {
 
 pub struct CompileOutput {
     pub qasm: String,
-    pub dag: ir::CircuitDAG,
+    pub hir: hir::HirProgram,
     pub diagnostics: Vec<sema::Diagnostic>,
     pub gates_removed: usize,
 }
@@ -56,18 +57,48 @@ pub fn compile_source(
         return Err(CompileError::Semantic(diagnostics));
     }
 
-    let mut dag = lower::lower(&program).map_err(CompileError::Lower)?;
+    let mut hir = lower::lower_hir(&program).map_err(CompileError::Lower)?;
     let gates_removed = if options.optimize {
-        opt::cancel_inverses(&mut dag).gates_removed
+        opt::optimize_hir(&mut hir).gates_removed
     } else {
         0
     };
 
-    let qasm = dag.emit_qasm();
+    let qasm = hir.emit_qasm();
     Ok(CompileOutput {
         qasm,
-        dag,
+        hir,
         diagnostics,
         gates_removed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compile_source_preserves_control_flow() {
+        let source =
+            "OPENQASM 3.0; qubit q; bool flag = true; if (flag == true) { h q; } else { x q; }";
+        let output = compile_source(source, CompileOptions { optimize: false })
+            .expect("control flow should lower to HIR");
+
+        assert!(output.qasm.contains("if (flag == true)"));
+        assert!(output.qasm.contains("h q;"));
+        assert!(output.qasm.contains("x q;"));
+        assert_eq!(output.hir.gate_count(), 2);
+    }
+
+    #[test]
+    fn compile_source_optimizes_nested_circuit_regions() {
+        let source = "OPENQASM 3.0; qubit q; if (true) { h q; h q; }";
+        let output = compile_source(source, CompileOptions { optimize: true })
+            .expect("nested circuit region should optimize");
+
+        assert!(output.qasm.contains("if (true)"));
+        assert!(!output.qasm.contains("h q;"));
+        assert_eq!(output.gates_removed, 2);
+        assert_eq!(output.hir.gate_count(), 0);
+    }
 }

@@ -32,25 +32,24 @@ Source (.qasm)
 └────┬─────┘     through branches (if/else, for, while)
      │
      ▼
-┌─────────┐   Translate straight-line quantum AST to a
-│  Lower   │   directed acyclic graph. Resolves qubit names
-└────┬─────┘   to wire indices and threads wires through ops.
+┌─────────┐   Translate AST to a high-level IR that keeps
+│  Lower   │   classical control flow explicit and lowers
+└────┬─────┘   straight-line quantum regions to DAGs.
      │
      ▼
-┌─────────┐   DAG-based circuit IR with In/Out boundary
-│   IR     │   nodes per wire. Supports topological
-│  (DAG)   │   traversal, depth calculation, and node
-└────┬─────┘   removal with automatic rewiring.
+┌─────────┐   HIR contains DAG-based circuit regions with
+│ HIR/DAG │   In/Out boundary nodes per wire, topological
+└────┬─────┘   traversal, and automatic rewiring.
      │
      ▼
-┌─────────┐   Graph rewrites on the DAG:
+┌─────────┐   Graph rewrites inside each DAG region:
 │   Opt    │   • Adjacent inverse cancellation
 │          │     (H·H, X·X, CX·CX, S·S†, T·T†)
 └────┬─────┘   • Fixed-point iteration for cascading
      │
      ▼
-┌─────────┐   Emit optimized OpenQASM 3 for lowered,
-│ Codegen  │   via topological traversal.
+┌─────────┐   Emit optimized OpenQASM 3 from HIR,
+│ Codegen  │   preserving control-flow structure.
 └──────────┘
 ```
 
@@ -58,19 +57,19 @@ Lexer, parser, and semantic errors are rendered with [ariadne](https://github.co
 
 ## Current status
 
-`qasm-rs` is currently a prototype compiler front end plus a straight-line circuit optimizer:
+`qasm-rs` is currently a prototype compiler front end plus a HIR/DAG optimizer:
 
 - It lexes, parses, and semantically checks a useful subset of OpenQASM 3.
 - It performs compile-time qubit linearity checks, including conservative checks through `if`/`else`, `for`, and `while`.
-- It lowers straight-line quantum circuits to a DAG, runs adjacent inverse cancellation, and emits OpenQASM 3.
-- It does **not yet lower classical control flow** (`if`/`else`, `for`, `while`) to IR. Programs using control flow can be parsed and analyzed, but the full compile pipeline rejects them before optimization/codegen.
+- It lowers programs to a high-level IR that preserves classical control flow and stores straight-line quantum regions as DAGs.
+- It runs adjacent inverse cancellation inside each DAG region and emits OpenQASM 3 from the HIR.
 - It does not yet implement the full OpenQASM 3 language.
 
 ## Supported language features
 
 **Quantum operations:** qubit/bit declarations (scalar and register), gate calls with parameters, gate definitions with classical and qubit parameters, gate modifiers (`ctrl`, `negctrl`, `inv`, `pow`), measurement, reset, barrier.
 
-**Classical control flow:** `if`/`else`, `for` loops with range expressions, `while` loops are parsed and semantically analyzed, including conservative linearity checks. They are not yet lowered to the circuit DAG or emitted by the full compiler pipeline.
+**Classical control flow:** `if`/`else`, `for` loops with range expressions, `while` loops are parsed, semantically analyzed, preserved in HIR, and emitted by the full compiler pipeline. Optimization currently applies to straight-line quantum regions inside those control-flow bodies.
 
 **Classical types:** `int`, `float`, `bool` declarations with optional initializers, assignment (`=`, `+=`, `-=`).
 
@@ -151,8 +150,9 @@ src/
 ├── ast.rs       Span-annotated AST types (quantum + classical)
 ├── parser.rs    Recursive-descent parser with Pratt expression parsing
 ├── sema.rs      Semantic analysis (scoped symbols + linearity checking)
+├── hir.rs       High-level IR preserving control flow around DAG regions
 ├── ir.rs        Circuit DAG — nodes are ops, edges are qubit wires
-├── lower.rs     Straight-line AST → DAG lowering (name resolution to wire indices)
+├── lower.rs     AST → HIR/DAG lowering (name resolution to wire indices)
 ├── opt.rs       Optimization passes (adjacent inverse cancellation)
 └── codegen.rs   Pretty-printer / QASM emitter with round-trip tests
 ```
@@ -165,7 +165,7 @@ src/
 
 **Conservative linearity.** The choice to use union (not intersection) at branch points makes the analysis sound — it will never allow a use-after-measure to slip through. This is the same tradeoff Rust makes: it rejects some programs that would be safe at runtime in exchange for static guarantees.
 
-**Why a DAG?** Quantum circuits have a natural graph structure: operations are nodes, qubit wires are edges, and data dependencies define the partial order. A DAG exposes parallelism (gates on disjoint qubits are unordered), makes optimization passes local graph rewrites, and is the standard IR in quantum compilers (Qiskit's DAGCircuit, tket's Circuit). The current DAG is best suited to straight-line circuits; supporting classical control flow will require either preserving control-flow structure around DAG regions or introducing a higher-level IR above the circuit DAG.
+**Why HIR plus DAG regions?** Quantum circuits have a natural graph structure: operations are nodes, qubit wires are edges, and data dependencies define the partial order. A DAG exposes parallelism (gates on disjoint qubits are unordered), makes optimization passes local graph rewrites, and is the standard IR in quantum compilers (Qiskit's DAGCircuit, tket's Circuit). Classical control flow is not itself a circuit edge, so `qasm-rs` preserves it in a high-level IR and embeds DAGs only for straight-line quantum regions.
 
 **Why ariadne?** Compiler diagnostics are a first-class feature, not an afterthought. Ariadne provides Rust-compiler-quality error rendering with minimal effort.
 
@@ -190,10 +190,10 @@ The optimizer runs fixed-point iteration — removing X·X exposes the H·H pair
 - [x] Gate definitions and modifiers
 - [x] Classical control flow parsing and semantic analysis (if/else, for, while)
 - [x] Straight-line IR lowering (AST → circuit DAG)
+- [x] High-level IR preserving control flow around DAG regions
+- [x] Full-pipeline control-flow emission from HIR
 - [x] Adjacent inverse gate cancellation
 - [ ] Integration test fixtures and CLI smoke tests
-- [ ] Decide control-flow IR design
-- [ ] Lower/codegen classical control flow or document straight-line-only compilation as a deliberate scope
 - [ ] Gate commutation analysis
 - [ ] Template-based peephole optimization
 - [ ] Function definitions (`def`) and inlining

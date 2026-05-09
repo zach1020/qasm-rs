@@ -257,10 +257,7 @@ impl CircuitDAG {
     pub fn op_count(&self) -> usize {
         self.nodes
             .iter()
-            .filter(|n| {
-                !n.removed
-                    && !matches!(n.op, Op::In { .. } | Op::Out { .. })
-            })
+            .filter(|n| !n.removed && !matches!(n.op, Op::In { .. } | Op::Out { .. }))
             .count()
     }
 
@@ -432,8 +429,8 @@ impl CircuitDAG {
         }
 
         let mut queue = VecDeque::new();
-        for id in 0..n {
-            if !self.nodes[id].removed && in_degree[id] == 0 {
+        for (id, degree) in in_degree.iter().enumerate().take(n) {
+            if !self.nodes[id].removed && *degree == 0 {
                 queue.push_back(id);
             }
         }
@@ -509,13 +506,9 @@ impl CircuitDAG {
         let mut emitted_regs = std::collections::HashSet::new();
         for (name, idx) in &self.qubit_names {
             if emitted_regs.insert(("qubit", name.clone())) {
-                if let Some(_) = idx {
+                if idx.is_some() {
                     // Find register size.
-                    let size = self
-                        .qubit_names
-                        .iter()
-                        .filter(|(n, _)| n == name)
-                        .count();
+                    let size = self.qubit_names.iter().filter(|(n, _)| n == name).count();
                     out.push_str(&format!("qubit[{}] {};\n", size, name));
                 } else {
                     out.push_str(&format!("qubit {};\n", name));
@@ -524,7 +517,7 @@ impl CircuitDAG {
         }
         for (name, idx) in &self.bit_names {
             if emitted_regs.insert(("bit", name.clone())) {
-                if let Some(_) = idx {
+                if idx.is_some() {
                     let size = self.bit_names.iter().filter(|(n, _)| n == name).count();
                     out.push_str(&format!("bit[{}] {};\n", size, name));
                 } else {
@@ -533,8 +526,17 @@ impl CircuitDAG {
             }
         }
 
-        // Emit operations in topological order.
+        self.emit_ops_qasm(&mut out, 0);
+
+        out
+    }
+
+    /// Emit only the live operations in topological order.
+    pub fn emit_ops_qasm(&self, out: &mut String, depth: usize) {
         for id in self.ops_topo() {
+            for _ in 0..depth {
+                out.push_str("  ");
+            }
             let node = &self.nodes[id];
             match &node.op {
                 Op::Gate {
@@ -581,23 +583,23 @@ impl CircuitDAG {
                         if i > 0 {
                             out.push_str(", ");
                         }
-                        self.emit_wire_name(&mut out, *w);
+                        self.emit_wire_name(out, *w);
                     }
                     out.push_str(";\n");
                 }
                 Op::Measure { qubit, bit } => {
                     if let Some(b) = bit {
-                        self.emit_bit_name(&mut out, *b);
+                        self.emit_bit_name(out, *b);
                         out.push_str(" = measure ");
                     } else {
                         out.push_str("measure ");
                     }
-                    self.emit_wire_name(&mut out, *qubit);
+                    self.emit_wire_name(out, *qubit);
                     out.push_str(";\n");
                 }
                 Op::Reset { qubit } => {
                     out.push_str("reset ");
-                    self.emit_wire_name(&mut out, *qubit);
+                    self.emit_wire_name(out, *qubit);
                     out.push_str(";\n");
                 }
                 Op::Barrier { qubits } => {
@@ -606,15 +608,13 @@ impl CircuitDAG {
                         if i > 0 {
                             out.push_str(", ");
                         }
-                        self.emit_wire_name(&mut out, *w);
+                        self.emit_wire_name(out, *w);
                     }
                     out.push_str(";\n");
                 }
                 _ => {}
             }
         }
-
-        out
     }
 
     /// Write the original name for a qubit wire index.
@@ -646,13 +646,23 @@ impl CircuitDAG {
 
 impl fmt::Display for CircuitDAG {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "CircuitDAG({} qubits, {} ops, depth {})",
-            self.num_qubits, self.op_count(), self.depth())?;
+        writeln!(
+            f,
+            "CircuitDAG({} qubits, {} ops, depth {})",
+            self.num_qubits,
+            self.op_count(),
+            self.depth()
+        )?;
         for id in self.ops_topo() {
             let node = &self.nodes[id];
             write!(f, "  [{}] ", id)?;
             match &node.op {
-                Op::Gate { name, qubits, params, modifiers } => {
+                Op::Gate {
+                    name,
+                    qubits,
+                    params,
+                    modifiers,
+                } => {
                     for m in modifiers {
                         match m {
                             Modifier::Ctrl(_) => write!(f, "ctrl @ ")?,
@@ -665,28 +675,36 @@ impl fmt::Display for CircuitDAG {
                     if !params.is_empty() {
                         write!(f, "(")?;
                         for (i, p) in params.iter().enumerate() {
-                            if i > 0 { write!(f, ", ")?; }
+                            if i > 0 {
+                                write!(f, ", ")?;
+                            }
                             write!(f, "{}", p)?;
                         }
                         write!(f, ")")?;
                     }
                     write!(f, " ")?;
                     for (i, w) in qubits.iter().enumerate() {
-                        if i > 0 { write!(f, ", ")?; }
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
                         write!(f, "w{}", w)?;
                     }
                     writeln!(f)?;
                 }
                 Op::Measure { qubit, bit } => {
                     write!(f, "measure w{}", qubit)?;
-                    if let Some(b) = bit { write!(f, " -> b{}", b)?; }
+                    if let Some(b) = bit {
+                        write!(f, " -> b{}", b)?;
+                    }
                     writeln!(f)?;
                 }
                 Op::Reset { qubit } => writeln!(f, "reset w{}", qubit)?,
                 Op::Barrier { qubits } => {
                     write!(f, "barrier ")?;
                     for (i, w) in qubits.iter().enumerate() {
-                        if i > 0 { write!(f, ", ")?; }
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
                         write!(f, "w{}", w)?;
                     }
                     writeln!(f)?;

@@ -8,6 +8,7 @@
 //!   - **Adjacent inverse cancellation**: remove pairs of self-inverse
 //!     gates (H·H = I, X·X = I, Y·Y = I, Z·Z = I, CX·CX = I).
 
+use crate::hir;
 use crate::ir::*;
 
 /// Statistics returned by an optimization pass.
@@ -137,12 +138,7 @@ pub fn cancel_inverses(dag: &mut CircuitDAG) -> OptStats {
             // Walk the wire from In to Out.
             let mut current = dag.input_nodes[wire];
 
-            loop {
-                let next = match dag.wire_successor(current, wire) {
-                    Some(id) => id,
-                    None => break,
-                };
-
+            while let Some(next) = dag.wire_successor(current, wire) {
                 // Skip non-gate nodes.
                 if !dag.node(current).op.is_gate() {
                     current = next;
@@ -154,9 +150,7 @@ pub fn cancel_inverses(dag: &mut CircuitDAG) -> OptStats {
                 }
 
                 // Check cancellation.
-                if gates_cancel(dag, current, next)
-                    && adjacent_on_all_wires(dag, current, next)
-                {
+                if gates_cancel(dag, current, next) && adjacent_on_all_wires(dag, current, next) {
                     // Get the predecessor of `current` on this wire
                     // before we remove nodes, so we can continue from there.
                     let prev = dag.wire_predecessor(current, wire);
@@ -174,6 +168,39 @@ pub fn cancel_inverses(dag: &mut CircuitDAG) -> OptStats {
                 } else {
                     current = next;
                 }
+            }
+        }
+    }
+
+    stats
+}
+
+/// Run DAG optimizations over every straight-line circuit region in HIR.
+pub fn optimize_hir(program: &mut hir::HirProgram) -> OptStats {
+    optimize_hir_stmts(&mut program.statements)
+}
+
+fn optimize_hir_stmts(stmts: &mut [hir::HirStmt]) -> OptStats {
+    let mut stats = OptStats::default();
+
+    for stmt in stmts {
+        match stmt {
+            hir::HirStmt::Ast(_) => {}
+            hir::HirStmt::Circuit(dag) => {
+                stats.gates_removed += cancel_inverses(dag).gates_removed;
+            }
+            hir::HirStmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                stats.gates_removed += optimize_hir_stmts(then_body).gates_removed;
+                if let Some(else_body) = else_body {
+                    stats.gates_removed += optimize_hir_stmts(else_body).gates_removed;
+                }
+            }
+            hir::HirStmt::For { body, .. } | hir::HirStmt::While { body, .. } => {
+                stats.gates_removed += optimize_hir_stmts(body).gates_removed;
             }
         }
     }
@@ -230,9 +257,7 @@ mod tests {
 
     #[test]
     fn cancel_cx_pair() {
-        let mut dag = lower_source(
-            "OPENQASM 3.0; qubit[2] q; cx q[0], q[1]; cx q[0], q[1];",
-        );
+        let mut dag = lower_source("OPENQASM 3.0; qubit[2] q; cx q[0], q[1]; cx q[0], q[1];");
         assert_eq!(dag.gate_count(), 2);
         let stats = cancel_inverses(&mut dag);
         assert_eq!(stats.gates_removed, 2);
@@ -242,9 +267,7 @@ mod tests {
     #[test]
     fn no_cancel_cx_different_order() {
         // cx q[0],q[1] then cx q[1],q[0] — different control/target, should NOT cancel.
-        let mut dag = lower_source(
-            "OPENQASM 3.0; qubit[2] q; cx q[0], q[1]; cx q[1], q[0];",
-        );
+        let mut dag = lower_source("OPENQASM 3.0; qubit[2] q; cx q[0], q[1]; cx q[1], q[0];");
         let stats = cancel_inverses(&mut dag);
         assert_eq!(stats.gates_removed, 0);
         assert_eq!(dag.gate_count(), 2);
@@ -253,9 +276,8 @@ mod tests {
     #[test]
     fn cancel_preserves_other_gates() {
         // h q[0]; x q[0]; x q[0]; cx q[0],q[1]; → h q[0]; cx q[0],q[1];
-        let mut dag = lower_source(
-            "OPENQASM 3.0; qubit[2] q; h q[0]; x q[0]; x q[0]; cx q[0], q[1];",
-        );
+        let mut dag =
+            lower_source("OPENQASM 3.0; qubit[2] q; h q[0]; x q[0]; x q[0]; cx q[0], q[1];");
         assert_eq!(dag.gate_count(), 4);
         let stats = cancel_inverses(&mut dag);
         assert_eq!(stats.gates_removed, 2);
