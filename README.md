@@ -63,6 +63,7 @@ Lexer, parser, and semantic errors are rendered with [ariadne](https://github.co
 - It performs compile-time qubit linearity checks, including conservative checks through `if`/`else`, `for`, and `while`.
 - It lowers programs to a high-level IR that preserves classical control flow and stores straight-line quantum regions as DAGs.
 - It runs adjacent inverse cancellation inside each DAG region and emits OpenQASM 3 from the HIR.
+- It reports exact depth for straight-line code and statically countable `for` loops; dynamic loops are reported as lower-bound estimates.
 - It does not yet implement the full OpenQASM 3 language.
 
 ## Supported language features

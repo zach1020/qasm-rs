@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use clap::Parser;
-use qasm_rs::{compile_source, CompileError, CompileOptions};
+use qasm_rs::{compile_source, hir::DepthEstimate, CompileError, CompileOptions};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -62,12 +62,16 @@ fn main() -> ExitCode {
     }
 
     if args.stats {
+        let depth = match output.hir.depth_estimate() {
+            DepthEstimate::Exact(n) => format!("depth={}", n),
+            DepthEstimate::AtLeast(n) => format!("depth>={}", n),
+        };
         eprintln!(
-            "qasm-rs: qubits={}, bits={}, gates={}, depth={}, gates_removed={}",
+            "qasm-rs: qubits={}, bits={}, gates={}, {}, gates_removed={}",
             output.hir.num_qubits,
             output.hir.num_bits,
             output.hir.gate_count(),
-            output.hir.depth(),
+            depth,
             output.gates_removed
         );
     }
