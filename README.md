@@ -32,9 +32,9 @@ Source (.qasm)
 └────┬─────┘     through branches (if/else, for, while)
      │
      ▼
-┌─────────┐   Translate AST to a directed acyclic graph.
-│  Lower   │   Resolves qubit names to wire indices,
-└────┬─────┘   threads wires through gate nodes.
+┌─────────┐   Translate straight-line quantum AST to a
+│  Lower   │   directed acyclic graph. Resolves qubit names
+└────┬─────┘   to wire indices and threads wires through ops.
      │
      ▼
 ┌─────────┐   DAG-based circuit IR with In/Out boundary
@@ -49,18 +49,28 @@ Source (.qasm)
 └────┬─────┘   • Fixed-point iteration for cascading
      │
      ▼
-┌─────────┐   Emit optimized OpenQASM 3 from the DAG
+┌─────────┐   Emit optimized OpenQASM 3 for lowered,
 │ Codegen  │   via topological traversal.
 └──────────┘
 ```
 
-All errors are rendered with [ariadne](https://github.com/zesterer/ariadne) for precise, colorized source diagnostics with secondary labels pointing to related locations (e.g. "first declared here", "measured here").
+Lexer, parser, and semantic errors are rendered with [ariadne](https://github.com/zesterer/ariadne) for precise, colorized source diagnostics with secondary labels pointing to related locations (e.g. "first declared here", "measured here").
+
+## Current status
+
+`qasm-rs` is currently a prototype compiler front end plus a straight-line circuit optimizer:
+
+- It lexes, parses, and semantically checks a useful subset of OpenQASM 3.
+- It performs compile-time qubit linearity checks, including conservative checks through `if`/`else`, `for`, and `while`.
+- It lowers straight-line quantum circuits to a DAG, runs adjacent inverse cancellation, and emits OpenQASM 3.
+- It does **not yet lower classical control flow** (`if`/`else`, `for`, `while`) to IR. Programs using control flow can be parsed and analyzed, but the full compile pipeline rejects them before optimization/codegen.
+- It does not yet implement the full OpenQASM 3 language.
 
 ## Supported language features
 
 **Quantum operations:** qubit/bit declarations (scalar and register), gate calls with parameters, gate definitions with classical and qubit parameters, gate modifiers (`ctrl`, `negctrl`, `inv`, `pow`), measurement, reset, barrier.
 
-**Classical control flow:** `if`/`else`, `for` loops with range expressions, `while` loops.
+**Classical control flow:** `if`/`else`, `for` loops with range expressions, `while` loops are parsed and semantically analyzed, including conservative linearity checks. They are not yet lowered to the circuit DAG or emitted by the full compiler pipeline.
 
 **Classical types:** `int`, `float`, `bool` declarations with optional initializers, assignment (`=`, `+=`, `-=`).
 
@@ -126,7 +136,7 @@ h q;                // ← ERROR: conservatively measured
 ```bash
 cargo build
 cargo test
-cargo run
+cargo run -- path/to/input.qasm
 ```
 
 Requires Rust 1.70+.
@@ -142,7 +152,7 @@ src/
 ├── parser.rs    Recursive-descent parser with Pratt expression parsing
 ├── sema.rs      Semantic analysis (scoped symbols + linearity checking)
 ├── ir.rs        Circuit DAG — nodes are ops, edges are qubit wires
-├── lower.rs     AST → DAG lowering (name resolution to wire indices)
+├── lower.rs     Straight-line AST → DAG lowering (name resolution to wire indices)
 ├── opt.rs       Optimization passes (adjacent inverse cancellation)
 └── codegen.rs   Pretty-printer / QASM emitter with round-trip tests
 ```
@@ -155,7 +165,7 @@ src/
 
 **Conservative linearity.** The choice to use union (not intersection) at branch points makes the analysis sound — it will never allow a use-after-measure to slip through. This is the same tradeoff Rust makes: it rejects some programs that would be safe at runtime in exchange for static guarantees.
 
-**Why a DAG?** Quantum circuits have a natural graph structure: operations are nodes, qubit wires are edges, and data dependencies define the partial order. A DAG exposes parallelism (gates on disjoint qubits are unordered), makes optimization passes local graph rewrites, and is the standard IR in quantum compilers (Qiskit's DAGCircuit, tket's Circuit). The long-term goal is to implement QAOA-relevant optimizations — parameter transfer, circuit structure analysis — as graph algorithms on this representation.
+**Why a DAG?** Quantum circuits have a natural graph structure: operations are nodes, qubit wires are edges, and data dependencies define the partial order. A DAG exposes parallelism (gates on disjoint qubits are unordered), makes optimization passes local graph rewrites, and is the standard IR in quantum compilers (Qiskit's DAGCircuit, tket's Circuit). The current DAG is best suited to straight-line circuits; supporting classical control flow will require either preserving control-flow structure around DAG regions or introducing a higher-level IR above the circuit DAG.
 
 **Why ariadne?** Compiler diagnostics are a first-class feature, not an afterthought. Ariadne provides Rust-compiler-quality error rendering with minimal effort.
 
@@ -178,9 +188,12 @@ The optimizer runs fixed-point iteration — removing X·X exposes the H·H pair
 - [x] Parser (recursive descent + Pratt expressions)
 - [x] Semantic analysis (scoped symbols, linearity)
 - [x] Gate definitions and modifiers
-- [x] Classical control flow (if/else, for, while)
-- [x] IR lowering (AST → circuit DAG)
+- [x] Classical control flow parsing and semantic analysis (if/else, for, while)
+- [x] Straight-line IR lowering (AST → circuit DAG)
 - [x] Adjacent inverse gate cancellation
+- [ ] Integration test fixtures and CLI smoke tests
+- [ ] Decide control-flow IR design
+- [ ] Lower/codegen classical control flow or document straight-line-only compilation as a deliberate scope
 - [ ] Gate commutation analysis
 - [ ] Template-based peephole optimization
 - [ ] Function definitions (`def`) and inlining
