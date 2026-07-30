@@ -68,13 +68,15 @@ Lexer, parser, and semantic errors are rendered with [ariadne](https://github.co
 
 ## Supported language features
 
-**Quantum operations:** qubit/bit declarations (scalar and register), register broadcasting, gate calls with parameters, gate definitions with classical and qubit parameters, gate modifiers (`ctrl`, `negctrl`, `inv`, `pow`), measurement, reset, barrier, and `include` directives. The compiler recognizes the common OpenQASM standard-gate signatures while preserving include directives in emitted code.
+**Quantum operations:** qubit/bit declarations (scalar and register), indexed operands and inclusive slices, register broadcasting, gate calls with parameters, gate definitions with classical and qubit parameters, gate modifiers (`ctrl`, `negctrl`, `inv`, `pow`), measurement, reset, barrier, numeric `delay` statements, and recursive local `include` directives with cycle detection. The compiler recognizes the common OpenQASM standard-gate signatures.
 
 **Classical control flow:** `if`/`else`, `for` loops with range expressions, `while` loops are parsed, semantically analyzed, preserved in HIR, and emitted by the full compiler pipeline. Optimization currently applies to straight-line quantum regions inside those control-flow bodies.
 
-**Classical types:** `int`, `float`, `bool` declarations with optional initializers, assignment (`=`, `+=`, `-=`), expression type checking, and Boolean condition validation.
+**Classical types:** `int`, `uint`, `float`, `angle`, and `bool` declarations with optional initializers, `const`/`input`/`output` qualifiers, assignment (`=`, `+=`, `-=`), indexed bit expressions, expression type checking, Boolean condition validation, and single-expression classical functions.
 
 **Expressions:** Pratt parser with correct precedence — arithmetic (`+`, `-`, `*`, `/`, `**` right-associative), comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`), unary negation, parenthesization, built-in constants (`pi`, `tau`, `euler`).
+
+**Explicit transformations:** user gate/function inlining, commuting inverse cancellation, inverse-rotation peepholes, and decomposition of `h`/`x` into the `{rz, sx, cx}` basis are available as library passes. Source-level inlining and basis decomposition are opt-in.
 
 **Legacy compatibility:** `qreg`/`creg` syntax is accepted and mapped to `qubit`/`bit`.
 
@@ -137,6 +139,7 @@ h q;                // ← ERROR: conservatively measured
 cargo build
 cargo test
 cargo run -- path/to/input.qasm
+cargo bench --bench pipeline
 ```
 
 Requires Rust 1.85+.
@@ -195,11 +198,13 @@ The optimizer runs fixed-point iteration — removing X·X exposes the H·H pair
 - [x] Full-pipeline control-flow emission from HIR
 - [x] Adjacent inverse gate cancellation
 - [x] Integration test fixtures and CLI smoke tests
-- [ ] Gate commutation analysis
-- [ ] Template-based peephole optimization
-- [ ] Function definitions (`def`) and inlining
-- [ ] Basis gate decomposition
+- [x] Gate commutation analysis for supported single-axis gates
+- [x] Template-based inverse-rotation and commuting-cancellation peepholes
+- [x] Single-expression function definitions (`def`) and gate/function inlining
+- [x] Opt-in `{rz, sx, cx}` basis decomposition
 - [ ] Encode qubit linearity into Rust's type system via generics
+
+See [architecture notes](docs/ARCHITECTURE.md), [contribution guidelines](CONTRIBUTING.md), and the [changelog](CHANGELOG.md).
 
 ## License
 

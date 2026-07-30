@@ -140,6 +140,56 @@ impl Parser {
         })
     }
 
+    /// Parse a program while recovering at statement boundaries so callers can
+    /// report several independent syntax errors in one compilation.
+    pub fn parse_recovering(&mut self) -> std::result::Result<Program, Vec<ParseError>> {
+        let version = match self.parse_version() {
+            Ok(version) => version,
+            Err(error) => return Err(vec![error]),
+        };
+        let mut statements = Vec::new();
+        let mut errors = Vec::new();
+        while !self.at_end() {
+            let start = self.pos;
+            match self.parse_stmt() {
+                Ok(statement) => statements.push(statement),
+                Err(error) => {
+                    errors.push(error);
+                    self.synchronize_statement();
+                    if self.pos == start {
+                        self.advance();
+                    }
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(Program {
+                version,
+                statements,
+            })
+        } else {
+            Err(errors)
+        }
+    }
+
+    fn synchronize_statement(&mut self) {
+        while let Some(token) = self.peek() {
+            match token {
+                Token::Semicolon => {
+                    self.advance();
+                    break;
+                }
+                Token::RBrace => {
+                    self.advance();
+                    break;
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+    }
+
     fn parse_version(&mut self) -> Result<String> {
         self.expect(&Token::OpenQasm)?;
         let ver = match self.peek().cloned() {
@@ -166,13 +216,17 @@ impl Parser {
             Some(Token::Bit) => self.parse_bit_decl(),
             Some(Token::Qreg) => self.parse_qreg_decl(),
             Some(Token::Creg) => self.parse_creg_decl(),
-            Some(Token::Int) | Some(Token::Float) | Some(Token::Bool) => {
-                self.parse_classical_decl()
-            }
+            Some(Token::Int) | Some(Token::Uint) | Some(Token::Float) | Some(Token::Angle)
+            | Some(Token::Bool) => self.parse_classical_decl(None),
+            Some(Token::Const) => self.parse_qualified_classical_decl(ClassicalQualifier::Const),
+            Some(Token::Input) => self.parse_qualified_classical_decl(ClassicalQualifier::Input),
+            Some(Token::Output) => self.parse_qualified_classical_decl(ClassicalQualifier::Output),
             Some(Token::Gate) => self.parse_gate_def(),
+            Some(Token::Def) => self.parse_function_def(),
             Some(Token::Measure) => self.parse_measure_stmt(),
             Some(Token::Reset) => self.parse_reset_stmt(),
             Some(Token::Barrier) => self.parse_barrier_stmt(),
+            Some(Token::Delay) => self.parse_delay_stmt(),
             Some(Token::If) => self.parse_if_stmt(),
             Some(Token::For) => self.parse_for_stmt(),
             Some(Token::While) => self.parse_while_stmt(),
@@ -253,11 +307,18 @@ impl Parser {
         })
     }
 
-    fn parse_classical_decl(&mut self) -> Result<Stmt> {
+    fn parse_qualified_classical_decl(&mut self, qualifier: ClassicalQualifier) -> Result<Stmt> {
+        self.advance();
+        self.parse_classical_decl(Some(qualifier))
+    }
+
+    fn parse_classical_decl(&mut self, qualifier: Option<ClassicalQualifier>) -> Result<Stmt> {
         let start = self.peek_span();
         let ty = match self.peek() {
             Some(Token::Int) => ClassicalType::Int,
+            Some(Token::Uint) => ClassicalType::UInt,
             Some(Token::Float) => ClassicalType::Float,
+            Some(Token::Angle) => ClassicalType::Angle,
             Some(Token::Bool) => ClassicalType::Bool,
             _ => return Err(self.error("expected classical type")),
         };
@@ -273,6 +334,7 @@ impl Parser {
 
         let end = self.expect(&Token::Semicolon)?;
         Ok(Stmt::ClassicalDecl {
+            qualifier,
             ty,
             name,
             init,
@@ -330,7 +392,9 @@ impl Parser {
         // `for int i in [start:end] { ... }`
         let var_ty = match self.peek() {
             Some(Token::Int) => ClassicalType::Int,
+            Some(Token::Uint) => ClassicalType::UInt,
             Some(Token::Float) => ClassicalType::Float,
+            Some(Token::Angle) => ClassicalType::Angle,
             Some(Token::Bool) => ClassicalType::Bool,
             _ => return Err(self.error("expected type in for loop")),
         };
@@ -436,6 +500,53 @@ impl Parser {
             body,
             span: Self::merge(&start, &end),
         })
+    }
+
+    fn parse_function_def(&mut self) -> Result<Stmt> {
+        let start = self.peek_span();
+        self.advance();
+        let (name, _) = self.expect_ident()?;
+        self.expect(&Token::LParen)?;
+        let mut params = Vec::new();
+        if !self.check(&Token::RParen) {
+            loop {
+                let ty = self.parse_classical_type()?;
+                let (param_name, _) = self.expect_ident()?;
+                params.push((ty, param_name));
+                if !self.check(&Token::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+        }
+        self.expect(&Token::RParen)?;
+        self.expect(&Token::Arrow)?;
+        let return_type = self.parse_classical_type()?;
+        self.expect(&Token::LBrace)?;
+        self.expect(&Token::Return)?;
+        let body = self.parse_expr()?;
+        self.expect(&Token::Semicolon)?;
+        let end = self.expect(&Token::RBrace)?;
+        Ok(Stmt::FunctionDef {
+            name,
+            params,
+            return_type,
+            body,
+            span: Self::merge(&start, &end),
+        })
+    }
+
+    fn parse_classical_type(&mut self) -> Result<ClassicalType> {
+        let ty = match self.peek() {
+            Some(Token::Int) => ClassicalType::Int,
+            Some(Token::Uint) => ClassicalType::UInt,
+            Some(Token::Float) => ClassicalType::Float,
+            Some(Token::Angle) => ClassicalType::Angle,
+            Some(Token::Bool) => ClassicalType::Bool,
+            _ => return Err(self.error("expected classical type")),
+        };
+        self.advance();
+        Ok(ty)
     }
 
     fn parse_ident_list(&mut self) -> Result<Vec<String>> {
@@ -578,6 +689,7 @@ impl Parser {
                     target: Some(GateOperand {
                         name,
                         index: None,
+                        slice: None,
                         span: name_span,
                     }),
                     span: Self::merge(&start, &end),
@@ -659,29 +771,59 @@ impl Parser {
         })
     }
 
+    fn parse_delay_stmt(&mut self) -> Result<Stmt> {
+        let start = self.peek_span();
+        self.advance();
+        self.expect(&Token::LBracket)?;
+        let duration = self.parse_expr()?;
+        self.expect(&Token::RBracket)?;
+        let targets = self.parse_operand_list()?;
+        let end = self.expect(&Token::Semicolon)?;
+        Ok(Stmt::Delay {
+            duration,
+            targets,
+            span: Self::merge(&start, &end),
+        })
+    }
+
     // ── Operands ────────────────────────────────────────────
 
     fn parse_operand(&mut self) -> Result<GateOperand> {
         let (name, name_span) = self.expect_ident()?;
         if self.check(&Token::LBracket) {
             self.advance();
-            let idx = match self.peek().cloned() {
+            let first = match self.peek().cloned() {
                 Some(Token::IntLiteral(n)) => {
                     self.advance();
                     n
                 }
                 _ => return Err(self.error("expected integer index")),
             };
+            let slice = if self.check(&Token::Colon) {
+                self.advance();
+                let last = match self.peek().cloned() {
+                    Some(Token::IntLiteral(n)) => {
+                        self.advance();
+                        n
+                    }
+                    _ => return Err(self.error("expected integer slice end")),
+                };
+                Some((first, last))
+            } else {
+                None
+            };
             let end = self.expect(&Token::RBracket)?;
             Ok(GateOperand {
                 name,
-                index: Some(idx),
+                index: if slice.is_none() { Some(first) } else { None },
+                slice,
                 span: Self::merge(&name_span, &end),
             })
         } else {
             Ok(GateOperand {
                 name,
                 index: None,
+                slice: None,
                 span: name_span,
             })
         }
@@ -804,6 +946,39 @@ impl Parser {
                 let span = self.peek_span();
                 let name = name.clone();
                 self.advance();
+                if self.check(&Token::LBracket) {
+                    self.advance();
+                    let index = match self.peek().cloned() {
+                        Some(Token::IntLiteral(index)) => {
+                            self.advance();
+                            index
+                        }
+                        _ => return Err(self.error("expected integer index")),
+                    };
+                    let end = self.expect(&Token::RBracket)?;
+                    return Ok(Expr::Index {
+                        name,
+                        index,
+                        span: Self::merge(&span, &end),
+                    });
+                }
+                if self.check(&Token::LParen) {
+                    self.advance();
+                    let mut args = Vec::new();
+                    if !self.check(&Token::RParen) {
+                        args.push(self.parse_expr()?);
+                        while self.check(&Token::Comma) {
+                            self.advance();
+                            args.push(self.parse_expr()?);
+                        }
+                    }
+                    let end = self.expect(&Token::RParen)?;
+                    return Ok(Expr::Call {
+                        name,
+                        args,
+                        span: Self::merge(&span, &end),
+                    });
+                }
                 match name.as_str() {
                     "pi" => Ok(Expr::Const(ConstKind::Pi, span)),
                     "tau" => Ok(Expr::Const(ConstKind::Tau, span)),
@@ -959,6 +1134,58 @@ mod tests {
     }
 
     #[test]
+    fn parse_qualified_classical_declarations() {
+        let mut parser = Parser::new(
+            "OPENQASM 3.0; const int shots = 100; input float theta; output bool result;",
+        );
+        let program = parser.parse().expect("qualified declarations should parse");
+        assert_eq!(program.statements.len(), 3);
+        assert!(matches!(
+            &program.statements[0],
+            Stmt::ClassicalDecl {
+                qualifier: Some(ClassicalQualifier::Const),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_indexed_classical_expression() {
+        let mut parser = Parser::new("OPENQASM 3.0; bit[2] c; bool flag = c[1] == 1;");
+        let program = parser.parse().expect("indexed expression should parse");
+        assert_eq!(program.statements.len(), 2);
+    }
+
+    #[test]
+    fn parse_quantum_operand_slice() {
+        let mut parser = Parser::new("OPENQASM 3.0; qubit[4] q; h q[1:3];");
+        let program = parser.parse().expect("slice should parse");
+        assert!(matches!(
+            &program.statements[1],
+            Stmt::GateCall { args, .. } if args[0].slice == Some((1, 3))
+        ));
+    }
+
+    #[test]
+    fn parse_delay_statement() {
+        let mut parser = Parser::new("OPENQASM 3.0; qubit q; delay[10] q;");
+        let program = parser.parse().expect("delay should parse");
+        assert!(matches!(&program.statements[1], Stmt::Delay { .. }));
+    }
+
+    #[test]
+    fn parse_expression_function_definition() {
+        let mut parser = Parser::new(
+            "OPENQASM 3.0; def twice(int x) -> int { return x * 2; } int y = twice(3);",
+        );
+        let program = parser.parse().expect("function should parse");
+        assert!(matches!(
+            &program.statements[0],
+            Stmt::FunctionDef { name, .. } if name == "twice"
+        ));
+    }
+
+    #[test]
     fn parse_assignment() {
         let source = "OPENQASM 3.0; int x = 0; x = 5; x += 1;";
         let mut parser = Parser::new(source);
@@ -1026,5 +1253,14 @@ mod tests {
             },
             _ => panic!("expected if"),
         }
+    }
+
+    #[test]
+    fn recovering_parser_collects_multiple_errors() {
+        let mut parser = Parser::new("OPENQASM 3.0; qubit ; bit ;");
+        let errors = parser
+            .parse_recovering()
+            .expect_err("both declarations are invalid");
+        assert_eq!(errors.len(), 2);
     }
 }

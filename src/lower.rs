@@ -121,6 +121,16 @@ impl WireMap {
     /// Resolve a classical bit operand that might be a whole register.
     /// If no index is given and it's a register, returns all bit IDs.
     fn resolve_bit_operand(&self, op: &ast::GateOperand) -> Result<Vec<usize>> {
+        if let Some((start, end)) = op.slice {
+            return (start..=end)
+                .map(|index| {
+                    self.bits
+                        .get(&(op.name.clone(), Some(index)))
+                        .copied()
+                        .ok_or_else(|| err(format!("unresolved bit `{}[{}]`", op.name, index)))
+                })
+                .collect();
+        }
         if op.index.is_some() {
             return Ok(vec![self.resolve_bit(op)?]);
         }
@@ -146,6 +156,16 @@ impl WireMap {
     /// Resolve a qubit operand that might be a whole register.
     /// If no index is given and it's a register, returns all wire IDs.
     fn resolve_qubit_operand(&self, op: &ast::GateOperand) -> Result<Vec<usize>> {
+        if let Some((start, end)) = op.slice {
+            return (start..=end)
+                .map(|index| {
+                    self.qubits
+                        .get(&(op.name.clone(), Some(index)))
+                        .copied()
+                        .ok_or_else(|| err(format!("unresolved qubit `{}[{}]`", op.name, index)))
+                })
+                .collect();
+        }
         if op.index.is_some() {
             return Ok(vec![self.resolve_qubit(op)?]);
         }
@@ -177,6 +197,11 @@ fn lower_expr(expr: &ast::Expr) -> Param {
         ast::Expr::FloatLit(f, _) => Param::Float(*f),
         ast::Expr::BoolLit(b, _) => Param::Int(if *b { 1 } else { 0 }),
         ast::Expr::Ident(name, _) => Param::Ident(name.clone()),
+        ast::Expr::Index { name, index, .. } => Param::Ident(format!("{}[{}]", name, index)),
+        ast::Expr::Call { name, args, .. } => Param::Call {
+            name: name.clone(),
+            args: args.iter().map(lower_expr).collect(),
+        },
         ast::Expr::Const(kind, _) => match kind {
             ast::ConstKind::Pi => Param::Pi,
             ast::ConstKind::Tau => Param::Tau,
@@ -215,8 +240,11 @@ fn lower_modifier(m: &ast::GateModifier) -> Modifier {
 
 // ── Main lowering pass ──────────────────────────────────────
 
-/// Lower a type-checked AST into a CircuitDAG.
-pub fn lower(program: &ast::Program) -> Result<CircuitDAG> {
+/// Lower a type-checked, straight-line AST into a single circuit DAG.
+///
+/// Prefer [`lower_hir`] for complete programs because it preserves classical
+/// control flow. This function remains useful for individual circuit regions.
+pub fn lower_straight_line(program: &ast::Program) -> Result<CircuitDAG> {
     // First pass: collect declarations to determine wire counts.
     let mut wires = WireMap::new();
 
@@ -245,6 +273,11 @@ pub fn lower(program: &ast::Program) -> Result<CircuitDAG> {
     dag.finalize();
 
     Ok(dag)
+}
+
+/// Compatibility alias for [`lower_straight_line`].
+pub fn lower(program: &ast::Program) -> Result<CircuitDAG> {
+    lower_straight_line(program)
 }
 
 /// Lower a type-checked AST into HIR.
@@ -357,6 +390,7 @@ fn is_circuit_stmt(stmt: &ast::Stmt) -> bool {
             | ast::Stmt::Measure { .. }
             | ast::Stmt::Reset { .. }
             | ast::Stmt::Barrier { .. }
+            | ast::Stmt::Delay { .. }
     )
 }
 
@@ -382,7 +416,8 @@ fn lower_stmt(stmt: &ast::Stmt, wires: &WireMap, dag: &mut CircuitDAG) -> Result
         | ast::Stmt::BitDecl { .. }
         | ast::Stmt::ClassicalDecl { .. }
         | ast::Stmt::Assignment { .. }
-        | ast::Stmt::GateDef { .. } => Ok(()),
+        | ast::Stmt::GateDef { .. }
+        | ast::Stmt::FunctionDef { .. } => Ok(()),
 
         ast::Stmt::GateCall {
             name,
@@ -461,6 +496,17 @@ fn lower_stmt(stmt: &ast::Stmt, wires: &WireMap, dag: &mut CircuitDAG) -> Result
                 qubit_wires.extend(wires.resolve_qubit_operand(t)?);
             }
             dag.append_barrier(qubit_wires);
+            Ok(())
+        }
+
+        ast::Stmt::Delay {
+            duration, targets, ..
+        } => {
+            let mut qubit_wires = Vec::new();
+            for target in targets {
+                qubit_wires.extend(wires.resolve_qubit_operand(target)?);
+            }
+            dag.append_delay(lower_expr(duration), qubit_wires);
             Ok(())
         }
 

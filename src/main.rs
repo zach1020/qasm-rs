@@ -33,7 +33,7 @@ fn main() -> ExitCode {
     let args = Args::parse();
     let source_name = args.input.display().to_string();
 
-    let source = match fs::read_to_string(&args.input) {
+    let source = match qasm_rs::include::load_with_includes(&args.input) {
         Ok(source) => source,
         Err(err) => {
             eprintln!("qasm-rs: failed to read {}: {}", source_name, err);
@@ -104,17 +104,19 @@ fn render_compile_error(file_name: &str, source: &str, err: CompileError) {
                     .unwrap();
             }
         }
-        CompileError::Parse(err) => {
-            Report::build(ReportKind::Error, file_name, err.span.start)
-                .with_message(&err.message)
-                .with_label(
-                    Label::new((file_name, err.span.clone()))
-                        .with_message(&err.message)
-                        .with_color(Color::Red),
-                )
-                .finish()
-                .eprint((file_name, Source::from(source)))
-                .unwrap();
+        CompileError::Parse(errors) => {
+            for err in errors {
+                Report::build(ReportKind::Error, file_name, err.span.start)
+                    .with_message(&err.message)
+                    .with_label(
+                        Label::new((file_name, err.span.clone()))
+                            .with_message(&err.message)
+                            .with_color(Color::Red),
+                    )
+                    .finish()
+                    .eprint((file_name, Source::from(source)))
+                    .unwrap();
+            }
         }
         CompileError::Semantic(diagnostics) => {
             for diagnostic in diagnostics {

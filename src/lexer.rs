@@ -27,14 +27,20 @@ pub enum Token {
     Reset,
     #[token("barrier")]
     Barrier,
+    #[token("delay")]
+    Delay,
     #[token("let")]
     Let,
     #[token("const")]
     Const,
     #[token("int")]
     Int,
+    #[token("uint")]
+    Uint,
     #[token("float")]
     Float,
+    #[token("angle")]
+    Angle,
     #[token("bool")]
     Bool,
     #[token("true")]

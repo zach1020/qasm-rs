@@ -71,6 +71,7 @@ pub enum SymbolKind {
     Qubit,
     Bit,
     Classical(ClassicalType),
+    Const(ClassicalType),
     /// A parameter name inside a gate definition (angle parameter).
     GateParam,
     /// A qubit wire name inside a gate definition.
@@ -89,6 +90,13 @@ pub struct Symbol {
 struct GateSig {
     param_count: usize,
     qubit_count: usize,
+    decl_span: Span,
+}
+
+#[derive(Debug, Clone)]
+struct FunctionSig {
+    params: Vec<ClassicalType>,
+    return_type: ClassicalType,
     decl_span: Span,
 }
 
@@ -150,17 +158,26 @@ fn eval_const_int(expr: &Expr) -> Option<i128> {
 fn type_name(ty: ClassicalType) -> &'static str {
     match ty {
         ClassicalType::Int => "int",
+        ClassicalType::UInt => "uint",
         ClassicalType::Float => "float",
+        ClassicalType::Angle => "angle",
         ClassicalType::Bool => "bool",
     }
 }
 
 fn is_numeric(ty: ClassicalType) -> bool {
-    matches!(ty, ClassicalType::Int | ClassicalType::Float)
+    matches!(
+        ty,
+        ClassicalType::Int | ClassicalType::UInt | ClassicalType::Float | ClassicalType::Angle
+    )
 }
 
 fn assignable(expected: ClassicalType, actual: ClassicalType) -> bool {
-    expected == actual || (expected == ClassicalType::Float && actual == ClassicalType::Int)
+    expected == actual
+        || (expected == ClassicalType::UInt && actual == ClassicalType::Int)
+        || (expected == ClassicalType::Angle && actual == ClassicalType::Float)
+        || (matches!(expected, ClassicalType::Float | ClassicalType::Angle)
+            && matches!(actual, ClassicalType::Int | ClassicalType::UInt))
 }
 
 // ── Scoped symbol table ─────────────────────────────────────
@@ -208,6 +225,7 @@ impl SymbolTable {
 struct SemaContext {
     symbols: SymbolTable,
     gates: HashMap<String, GateSig>,
+    functions: HashMap<String, FunctionSig>,
     /// Tracks (register_name, index) → span of measurement.
     measured: HashMap<(String, Option<u64>), Span>,
     diags: Vec<Diagnostic>,
@@ -218,6 +236,7 @@ impl SemaContext {
         Self {
             symbols: SymbolTable::new(),
             gates: HashMap::new(),
+            functions: HashMap::new(),
             measured: HashMap::new(),
             diags: Vec::new(),
         }
@@ -272,8 +291,17 @@ impl SemaContext {
                     SymbolKind::Bit => "bit",
                     SymbolKind::Classical(t) => match t {
                         ClassicalType::Int => "int",
+                        ClassicalType::UInt => "uint",
                         ClassicalType::Float => "float",
+                        ClassicalType::Angle => "angle",
                         ClassicalType::Bool => "bool",
+                    },
+                    SymbolKind::Const(t) => match t {
+                        ClassicalType::Int => "const int",
+                        ClassicalType::UInt => "const uint",
+                        ClassicalType::Float => "const float",
+                        ClassicalType::Angle => "const angle",
+                        ClassicalType::Bool => "const bool",
                     },
                     SymbolKind::GateParam => "gate parameter",
                     SymbolKind::GateQubit => "gate qubit",
@@ -291,7 +319,7 @@ impl SemaContext {
         }
 
         // Gate qubits should not be indexed.
-        if sym.kind == SymbolKind::GateQubit && op.index.is_some() {
+        if sym.kind == SymbolKind::GateQubit && (op.index.is_some() || op.slice.is_some()) {
             self.diags.push(Diagnostic::error(
                 format!(
                     "cannot index gate qubit `{}` — gate qubits are single wires",
@@ -330,9 +358,52 @@ impl SemaContext {
                 _ => {} // in bounds
             }
         }
+        if let Some((start, end)) = op.slice {
+            match sym.size {
+                Some(size) if start <= end && end < size => {}
+                Some(size) => self.diags.push(Diagnostic::error_with_note(
+                    format!(
+                        "slice {}:{} is out of bounds for `{}` (size {})",
+                        start, end, op.name, size
+                    ),
+                    op.span.clone(),
+                    format!("`{}` declared with size {} here", op.name, size),
+                    sym.decl_span.clone(),
+                )),
+                None => self.diags.push(Diagnostic::error(
+                    format!("cannot slice scalar `{}`", op.name),
+                    op.span.clone(),
+                )),
+            }
+        }
+    }
+
+    fn operand_width(&self, op: &GateOperand) -> Option<u64> {
+        let symbol = self.symbols.get(&op.name)?;
+        if let Some((start, end)) = op.slice {
+            end.checked_sub(start)?.checked_add(1)
+        } else if op.index.is_some() {
+            Some(1)
+        } else {
+            Some(symbol.size.unwrap_or(1))
+        }
     }
 
     fn check_use_after_measure(&mut self, op: &GateOperand, use_span: &Span) {
+        if let Some((start, end)) = op.slice {
+            for index in start..=end {
+                if let Some(measure_span) = self.lookup_measured(&op.name, Some(index)) {
+                    self.diags.push(Diagnostic::error_with_note(
+                        format!("use of qubit `{}[{}]` after measurement", op.name, index),
+                        use_span.clone(),
+                        "qubit was measured here",
+                        measure_span,
+                    ));
+                    return;
+                }
+            }
+            return;
+        }
         if let Some(measure_span) = self.lookup_measured(&op.name, op.index) {
             self.diags.push(Diagnostic::error_with_note(
                 format!(
@@ -361,6 +432,13 @@ impl SemaContext {
     }
 
     fn mark_measured(&mut self, qubit: &GateOperand, span: &Span) {
+        if let Some((start, end)) = qubit.slice {
+            for index in start..=end {
+                self.measured
+                    .insert((qubit.name.clone(), Some(index)), span.clone());
+            }
+            return;
+        }
         self.measured
             .insert((qubit.name.clone(), qubit.index), span.clone());
         // If measured without index, mark all individual indices too.
@@ -377,6 +455,12 @@ impl SemaContext {
     }
 
     fn clear_measured(&mut self, target: &GateOperand) {
+        if let Some((start, end)) = target.slice {
+            for index in start..=end {
+                self.measured.remove(&(target.name.clone(), Some(index)));
+            }
+            return;
+        }
         self.measured.remove(&(target.name.clone(), target.index));
         if target.index.is_none() {
             self.measured.retain(|(name, _), _| name != &target.name);
@@ -404,12 +488,30 @@ impl SemaContext {
             }
 
             Stmt::ClassicalDecl {
+                qualifier,
                 ty,
                 name,
                 init,
                 span,
             } => {
-                self.declare(name, SymbolKind::Classical(*ty), None, span);
+                let kind = if matches!(qualifier, Some(ClassicalQualifier::Const)) {
+                    SymbolKind::Const(*ty)
+                } else {
+                    SymbolKind::Classical(*ty)
+                };
+                self.declare(name, kind, None, span);
+                if matches!(qualifier, Some(ClassicalQualifier::Const)) && init.is_none() {
+                    self.diags.push(Diagnostic::error(
+                        format!("const `{}` requires an initializer", name),
+                        span.clone(),
+                    ));
+                }
+                if matches!(qualifier, Some(ClassicalQualifier::Input)) && init.is_some() {
+                    self.diags.push(Diagnostic::error(
+                        format!("input `{}` cannot have an initializer", name),
+                        span.clone(),
+                    ));
+                }
                 if let Some(expr) = init {
                     if let Some(actual) = self.check_expr(expr) {
                         if !assignable(*ty, actual) {
@@ -466,6 +568,13 @@ impl SemaContext {
                             }
                         }
                     }
+                    Some(Symbol {
+                        kind: SymbolKind::Const(_),
+                        ..
+                    }) => self.diags.push(Diagnostic::error(
+                        format!("cannot assign to const `{}`", name),
+                        span.clone(),
+                    )),
                     Some(_) => self.diags.push(Diagnostic::error(
                         format!("`{}` is not an assignable classical variable", name),
                         span.clone(),
@@ -555,6 +664,19 @@ impl SemaContext {
                     self.check_operand(op, Some(SymbolKind::Qubit));
                     self.check_use_after_measure(op, span);
                 }
+                let register_widths: Vec<u64> = args
+                    .iter()
+                    .filter_map(|operand| self.operand_width(operand))
+                    .filter(|width| *width > 1)
+                    .collect();
+                if let Some(first) = register_widths.first() {
+                    if register_widths.iter().any(|width| width != first) {
+                        self.diags.push(Diagnostic::error(
+                            "gate register operands must have the same length for broadcasting",
+                            span.clone(),
+                        ));
+                    }
+                }
             }
 
             Stmt::GateDef {
@@ -606,6 +728,57 @@ impl SemaContext {
                 self.symbols.pop_scope();
             }
 
+            Stmt::FunctionDef {
+                name,
+                params,
+                return_type,
+                body,
+                span,
+            } => {
+                if let Some(previous) = self.functions.get(name) {
+                    self.diags.push(Diagnostic::error_with_note(
+                        format!("function `{}` is already defined", name),
+                        span.clone(),
+                        "first defined here",
+                        previous.decl_span.clone(),
+                    ));
+                } else {
+                    self.functions.insert(
+                        name.clone(),
+                        FunctionSig {
+                            params: params.iter().map(|(ty, _)| *ty).collect(),
+                            return_type: *return_type,
+                            decl_span: span.clone(),
+                        },
+                    );
+                }
+                self.symbols.push_scope();
+                for (ty, param_name) in params {
+                    self.symbols.insert(
+                        param_name.clone(),
+                        Symbol {
+                            kind: SymbolKind::Classical(*ty),
+                            size: None,
+                            decl_span: span.clone(),
+                        },
+                    );
+                }
+                if let Some(actual) = self.check_expr(body) {
+                    if !assignable(*return_type, actual) {
+                        self.diags.push(Diagnostic::error(
+                            format!(
+                                "function `{}` returns {}, but its body has type {}",
+                                name,
+                                type_name(*return_type),
+                                type_name(actual)
+                            ),
+                            body.span().clone(),
+                        ));
+                    }
+                }
+                self.symbols.pop_scope();
+            }
+
             Stmt::Measure {
                 qubit,
                 target,
@@ -614,6 +787,21 @@ impl SemaContext {
                 self.check_operand(qubit, Some(SymbolKind::Qubit));
                 if let Some(t) = target {
                     self.check_operand(t, Some(SymbolKind::Bit));
+                    if let (Some(source_width), Some(target_width)) =
+                        (self.operand_width(qubit), self.operand_width(t))
+                    {
+                        if source_width != target_width {
+                            self.diags.push(Diagnostic::error_with_note(
+                                format!(
+                                    "measurement source has {} qubit(s), but target has {} bit(s)",
+                                    source_width, target_width
+                                ),
+                                span.clone(),
+                                "measurement target declared here",
+                                t.span.clone(),
+                            ));
+                        }
+                    }
                 }
                 // Warn on double-measure.
                 if self.lookup_measured(&qubit.name, qubit.index).is_some() {
@@ -634,6 +822,25 @@ impl SemaContext {
                 for op in targets {
                     self.check_operand(op, Some(SymbolKind::Qubit));
                     self.check_use_after_measure(op, span);
+                }
+            }
+
+            Stmt::Delay {
+                duration,
+                targets,
+                span,
+            } => {
+                if let Some(ty) = self.check_expr(duration) {
+                    if !is_numeric(ty) {
+                        self.diags.push(Diagnostic::error(
+                            "delay duration must be numeric",
+                            duration.span().clone(),
+                        ));
+                    }
+                }
+                for operand in targets {
+                    self.check_operand(operand, Some(SymbolKind::Qubit));
+                    self.check_use_after_measure(operand, span);
                 }
             }
 
@@ -791,6 +998,7 @@ impl SemaContext {
         match expr {
             Expr::Ident(name, span) => match self.symbols.get(name).map(|symbol| symbol.kind) {
                 Some(SymbolKind::Classical(ty)) => Some(ty),
+                Some(SymbolKind::Const(ty)) => Some(ty),
                 Some(SymbolKind::Bit) => Some(ClassicalType::Int),
                 Some(SymbolKind::GateParam) => Some(ClassicalType::Float),
                 Some(_) => {
@@ -808,6 +1016,87 @@ impl SemaContext {
                     None
                 }
             },
+            Expr::Index { name, index, span } => {
+                let Some(symbol) = self.symbols.get(name).cloned() else {
+                    self.diags.push(Diagnostic::error(
+                        format!("`{}` is not declared", name),
+                        span.clone(),
+                    ));
+                    return None;
+                };
+                match symbol.kind {
+                    SymbolKind::Bit => match symbol.size {
+                        Some(size) if *index < size => Some(ClassicalType::Int),
+                        Some(size) => {
+                            self.diags.push(Diagnostic::error(
+                                format!(
+                                    "index {} is out of bounds for `{}` (size {})",
+                                    index, name, size
+                                ),
+                                span.clone(),
+                            ));
+                            None
+                        }
+                        None => {
+                            self.diags.push(Diagnostic::error(
+                                format!("cannot index scalar bit `{}`", name),
+                                span.clone(),
+                            ));
+                            None
+                        }
+                    },
+                    _ => {
+                        self.diags.push(Diagnostic::error(
+                            format!("`{}` is not an indexable classical register", name),
+                            span.clone(),
+                        ));
+                        None
+                    }
+                }
+            }
+            Expr::Call { name, args, span } => {
+                let Some(signature) = self.functions.get(name).cloned() else {
+                    self.diags.push(Diagnostic::error(
+                        format!("function `{}` is not defined", name),
+                        span.clone(),
+                    ));
+                    for arg in args {
+                        self.check_expr(arg);
+                    }
+                    return None;
+                };
+                if args.len() != signature.params.len() {
+                    self.diags.push(Diagnostic::error_with_note(
+                        format!(
+                            "function `{}` expects {} argument(s), got {}",
+                            name,
+                            signature.params.len(),
+                            args.len()
+                        ),
+                        span.clone(),
+                        "function defined here",
+                        signature.decl_span.clone(),
+                    ));
+                }
+                for (index, arg) in args.iter().enumerate() {
+                    let actual = self.check_expr(arg);
+                    if let (Some(expected), Some(actual)) = (signature.params.get(index), actual) {
+                        if !assignable(*expected, actual) {
+                            self.diags.push(Diagnostic::error(
+                                format!(
+                                    "argument {} to `{}` must be {}, found {}",
+                                    index + 1,
+                                    name,
+                                    type_name(*expected),
+                                    type_name(actual)
+                                ),
+                                arg.span().clone(),
+                            ));
+                        }
+                    }
+                }
+                Some(signature.return_type)
+            }
             Expr::IntLit(..) => Some(ClassicalType::Int),
             Expr::FloatLit(..) | Expr::Const(..) => Some(ClassicalType::Float),
             Expr::BoolLit(..) => Some(ClassicalType::Bool),
@@ -827,10 +1116,14 @@ impl SemaContext {
                 let rhs_ty = self.check_expr(rhs);
                 match (lhs_ty, rhs_ty) {
                     (Some(lhs_ty), Some(rhs_ty)) if is_numeric(lhs_ty) && is_numeric(rhs_ty) => {
-                        if lhs_ty == ClassicalType::Float || rhs_ty == ClassicalType::Float {
+                        if lhs_ty == ClassicalType::Angle || rhs_ty == ClassicalType::Angle {
+                            Some(ClassicalType::Angle)
+                        } else if lhs_ty == ClassicalType::Float || rhs_ty == ClassicalType::Float {
                             Some(ClassicalType::Float)
-                        } else {
+                        } else if lhs_ty == ClassicalType::Int || rhs_ty == ClassicalType::Int {
                             Some(ClassicalType::Int)
+                        } else {
+                            Some(ClassicalType::UInt)
                         }
                     }
                     (Some(_), Some(_)) => {
@@ -1041,6 +1334,65 @@ mod tests {
         assert!(errors(&invalid)
             .iter()
             .any(|diag| diag.message.contains("positive compile-time integer")));
+    }
+
+    #[test]
+    fn rejects_mismatched_measurement_widths_during_sema() {
+        let diags = analyze_source("OPENQASM 3.0; qubit[2] q; bit c; c = measure q;");
+        assert!(errors(&diags)
+            .iter()
+            .any(|diag| diag.message.contains("measurement source has 2")));
+    }
+
+    #[test]
+    fn rejects_mismatched_broadcast_widths_during_sema() {
+        let diags = analyze_source("OPENQASM 3.0; qubit[2] a; qubit[3] b; cx a, b;");
+        assert!(errors(&diags)
+            .iter()
+            .any(|diag| diag.message.contains("same length")));
+    }
+
+    #[test]
+    fn validates_qualified_declarations_and_indexed_expressions() {
+        let valid = analyze_source(
+            "OPENQASM 3.0; const int shots = 100; input float theta; bit[2] c; bool flag = c[1] == 1;",
+        );
+        assert!(errors(&valid).is_empty(), "{valid:?}");
+
+        let invalid = analyze_source(
+            "OPENQASM 3.0; const int shots; shots = 2; bit[1] c; bool b = c[2] == 1;",
+        );
+        assert!(errors(&invalid).len() >= 3, "{invalid:?}");
+    }
+
+    #[test]
+    fn validates_expression_functions() {
+        let valid = analyze_source(
+            "OPENQASM 3.0; def twice(int x) -> int { return x * 2; } int y = twice(3);",
+        );
+        assert!(errors(&valid).is_empty(), "{valid:?}");
+
+        let invalid =
+            analyze_source("OPENQASM 3.0; def bad(bool x) -> int { return x; } int y = bad(3);");
+        assert!(errors(&invalid).len() >= 2, "{invalid:?}");
+    }
+
+    #[test]
+    fn validates_uint_and_angle_types() {
+        let diags = analyze_source(
+            "OPENQASM 3.0; uint count = 2; angle theta = pi / 2; qubit q; rz(theta) q;",
+        );
+        assert!(errors(&diags).is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn validates_quantum_operand_slices() {
+        let valid = analyze_source("OPENQASM 3.0; qubit[4] q; h q[1:3];");
+        assert!(errors(&valid).is_empty(), "{valid:?}");
+        let invalid = analyze_source("OPENQASM 3.0; qubit[2] q; h q[1:3];");
+        assert!(errors(&invalid)
+            .iter()
+            .any(|diag| diag.message.contains("slice 1:3")));
     }
 
     #[test]

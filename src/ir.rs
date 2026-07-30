@@ -27,9 +27,13 @@ pub type NodeId = usize;
 #[derive(Debug, Clone)]
 pub enum Op {
     /// Input boundary for qubit wire `wire`. Every wire has exactly one.
-    In { wire: usize },
+    In {
+        wire: usize,
+    },
     /// Output boundary for qubit wire `wire`. Every wire has exactly one.
-    Out { wire: usize },
+    Out {
+        wire: usize,
+    },
     /// A gate application on one or more qubit wires.
     Gate {
         name: String,
@@ -38,11 +42,22 @@ pub enum Op {
         qubits: Vec<usize>,
     },
     /// Measurement: collapse qubit wire to classical bit.
-    Measure { qubit: usize, bit: Option<usize> },
+    Measure {
+        qubit: usize,
+        bit: Option<usize>,
+    },
     /// Reset qubit to |0⟩, restoring it as a usable resource.
-    Reset { qubit: usize },
+    Reset {
+        qubit: usize,
+    },
     /// Barrier: scheduling fence across specified wires.
-    Barrier { qubits: Vec<usize> },
+    Barrier {
+        qubits: Vec<usize>,
+    },
+    Delay {
+        duration: Param,
+        qubits: Vec<usize>,
+    },
 }
 
 impl Op {
@@ -50,7 +65,7 @@ impl Op {
     pub fn qubits(&self) -> &[usize] {
         match self {
             Op::In { wire } | Op::Out { wire } => std::slice::from_ref(wire),
-            Op::Gate { qubits, .. } | Op::Barrier { qubits } => qubits,
+            Op::Gate { qubits, .. } | Op::Barrier { qubits } | Op::Delay { qubits, .. } => qubits,
             Op::Measure { qubit, .. } | Op::Reset { qubit } => std::slice::from_ref(qubit),
         }
     }
@@ -81,6 +96,10 @@ pub enum Param {
     Tau,
     Euler,
     Ident(String),
+    Call {
+        name: String,
+        args: Vec<Param>,
+    },
     Neg(Box<Param>),
     BinOp {
         op: ParamOp,
@@ -98,6 +117,16 @@ impl PartialEq for Param {
             (Param::Tau, Param::Tau) => true,
             (Param::Euler, Param::Euler) => true,
             (Param::Ident(a), Param::Ident(b)) => a == b,
+            (
+                Param::Call {
+                    name: name_a,
+                    args: args_a,
+                },
+                Param::Call {
+                    name: name_b,
+                    args: args_b,
+                },
+            ) => name_a == name_b && args_a == args_b,
             (Param::Neg(a), Param::Neg(b)) => a == b,
             (
                 Param::BinOp {
@@ -125,6 +154,16 @@ impl fmt::Display for Param {
             Param::Tau => write!(f, "tau"),
             Param::Euler => write!(f, "euler"),
             Param::Ident(s) => write!(f, "{}", s),
+            Param::Call { name, args } => {
+                write!(f, "{}(", name)?;
+                for (index, arg) in args.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", arg)?;
+                }
+                write!(f, ")")
+            }
             Param::Neg(inner) => write!(f, "-{}", inner),
             Param::BinOp { op, lhs, rhs } => write!(f, "({} {} {})", lhs, op, rhs),
         }
@@ -362,6 +401,15 @@ impl CircuitDAG {
         let id = self.alloc_node(Op::Barrier { qubits });
         for w in &wires {
             self.append_on_wire(id, *w);
+        }
+        id
+    }
+
+    pub fn append_delay(&mut self, duration: Param, qubits: Vec<usize>) -> NodeId {
+        let wires = qubits.clone();
+        let id = self.alloc_node(Op::Delay { duration, qubits });
+        for wire in wires {
+            self.append_on_wire(id, wire);
         }
         id
     }
@@ -609,6 +657,16 @@ impl CircuitDAG {
                             out.push_str(", ");
                         }
                         self.emit_wire_name(out, *w);
+                    }
+                    out.push_str(";\n");
+                }
+                Op::Delay { duration, qubits } => {
+                    out.push_str(&format!("delay[{}] ", duration));
+                    for (index, wire) in qubits.iter().enumerate() {
+                        if index > 0 {
+                            out.push_str(", ");
+                        }
+                        self.emit_wire_name(out, *wire);
                     }
                     out.push_str(";\n");
                 }

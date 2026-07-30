@@ -70,3 +70,13 @@ fn emit_writes_output_file() {
     assert!(emitted.contains("include \"stdgates.inc\";"));
     assert!(emitted.contains("measure"));
 }
+
+#[test]
+fn resolves_local_include_files() {
+    let input = fixture("custom_include.qasm");
+    let output = run(&[input.to_str().unwrap()]);
+    assert!(output.status.success(), "{:?}", output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("gate custom"));
+    assert!(!stdout.contains("include \"custom.inc\""));
+}

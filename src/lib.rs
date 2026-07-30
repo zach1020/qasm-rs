@@ -1,6 +1,15 @@
+//! OpenQASM 3 parsing, semantic analysis, circuit lowering, optimization, and
+//! emission.
+//!
+//! Use [`compile_source`] for in-memory programs. File-based clients can call
+//! [`include::load_with_includes`] before compilation to resolve local include
+//! files recursively.
+
 pub mod ast;
 pub mod codegen;
 pub mod hir;
+pub mod include;
+pub mod inline;
 pub mod ir;
 pub mod lexer;
 pub mod lower;
@@ -13,6 +22,7 @@ use span::Span;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CompileOptions {
+    /// Run the default, semantics-preserving optimization pipeline.
     pub optimize: bool,
 }
 
@@ -23,20 +33,30 @@ impl Default for CompileOptions {
 }
 
 pub struct CompileOutput {
+    /// Canonically emitted OpenQASM.
     pub qasm: String,
+    /// Lowered program with circuit DAG regions.
     pub hir: hir::HirProgram,
+    /// Non-fatal diagnostics, currently warnings.
     pub diagnostics: Vec<sema::Diagnostic>,
+    /// Number of gates removed by optimization.
     pub gates_removed: usize,
 }
 
 #[derive(Debug)]
 pub enum CompileError {
+    /// Invalid source bytes and their spans.
     Lex(Vec<Span>),
-    Parse(parser::ParseError),
+    /// One or more syntax errors recovered from the source.
+    Parse(Vec<parser::ParseError>),
+    /// Semantic or linearity errors.
     Semantic(Vec<sema::Diagnostic>),
+    /// Failure while lowering a semantically valid AST.
     Lower(lower::LowerError),
 }
 
+/// Compile OpenQASM source through parsing, semantic analysis, HIR lowering,
+/// optional optimization, and canonical emission.
 pub fn compile_source(
     source: &str,
     options: CompileOptions,
@@ -47,7 +67,7 @@ pub fn compile_source(
     }
 
     let mut parser = parser::Parser::new(source);
-    let program = parser.parse().map_err(CompileError::Parse)?;
+    let program = parser.parse_recovering().map_err(CompileError::Parse)?;
 
     let diagnostics = sema::analyze(&program);
     let has_errors = diagnostics

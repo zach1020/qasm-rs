@@ -25,6 +25,7 @@ pub enum Stmt {
         span: Span,
     },
     ClassicalDecl {
+        qualifier: Option<ClassicalQualifier>,
         ty: ClassicalType,
         name: String,
         init: Option<Expr>,
@@ -50,6 +51,13 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
+    FunctionDef {
+        name: String,
+        params: Vec<(ClassicalType, String)>,
+        return_type: ClassicalType,
+        body: Expr,
+        span: Span,
+    },
     Measure {
         qubit: GateOperand,
         target: Option<GateOperand>,
@@ -60,6 +68,11 @@ pub enum Stmt {
         span: Span,
     },
     Barrier {
+        targets: Vec<GateOperand>,
+        span: Span,
+    },
+    Delay {
+        duration: Expr,
         targets: Vec<GateOperand>,
         span: Span,
     },
@@ -93,9 +106,11 @@ impl Stmt {
             | Stmt::Assignment { span, .. }
             | Stmt::GateCall { span, .. }
             | Stmt::GateDef { span, .. }
+            | Stmt::FunctionDef { span, .. }
             | Stmt::Measure { span, .. }
             | Stmt::Reset { span, .. }
             | Stmt::Barrier { span, .. }
+            | Stmt::Delay { span, .. }
             | Stmt::If { span, .. }
             | Stmt::For { span, .. }
             | Stmt::While { span, .. } => span,
@@ -107,15 +122,36 @@ impl Stmt {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ClassicalType {
     Int,
+    UInt,
     Float,
+    Angle,
     Bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassicalQualifier {
+    Const,
+    Input,
+    Output,
+}
+
+impl std::fmt::Display for ClassicalQualifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClassicalQualifier::Const => write!(f, "const"),
+            ClassicalQualifier::Input => write!(f, "input"),
+            ClassicalQualifier::Output => write!(f, "output"),
+        }
+    }
 }
 
 impl std::fmt::Display for ClassicalType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ClassicalType::Int => write!(f, "int"),
+            ClassicalType::UInt => write!(f, "uint"),
             ClassicalType::Float => write!(f, "float"),
+            ClassicalType::Angle => write!(f, "angle"),
             ClassicalType::Bool => write!(f, "bool"),
         }
     }
@@ -163,6 +199,16 @@ pub enum Expr {
     FloatLit(f64, Span),
     BoolLit(bool, Span),
     Ident(String, Span),
+    Index {
+        name: String,
+        index: u64,
+        span: Span,
+    },
+    Call {
+        name: String,
+        args: Vec<Expr>,
+        span: Span,
+    },
     /// Built-in constants: pi, tau, euler
     Const(ConstKind, Span),
     Neg(Box<Expr>, Span),
@@ -187,6 +233,8 @@ impl Expr {
             | Expr::FloatLit(_, s)
             | Expr::BoolLit(_, s)
             | Expr::Ident(_, s)
+            | Expr::Index { span: s, .. }
+            | Expr::Call { span: s, .. }
             | Expr::Const(_, s)
             | Expr::Neg(_, s)
             | Expr::BinOp { span: s, .. }
@@ -260,6 +308,7 @@ impl std::fmt::Display for ConstKind {
 pub struct GateOperand {
     pub name: String,
     pub index: Option<u64>,
+    pub slice: Option<(u64, u64)>,
     pub span: Span,
 }
 
@@ -267,7 +316,10 @@ impl std::fmt::Display for GateOperand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.index {
             Some(i) => write!(f, "{}[{}]", self.name, i),
-            None => write!(f, "{}", self.name),
+            None => match self.slice {
+                Some((start, end)) => write!(f, "{}[{}:{}]", self.name, start, end),
+                None => write!(f, "{}", self.name),
+            },
         }
     }
 }
