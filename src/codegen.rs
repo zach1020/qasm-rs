@@ -26,6 +26,9 @@ pub(crate) fn indent(out: &mut String, depth: usize) {
 pub(crate) fn emit_stmt(out: &mut String, stmt: &Stmt, depth: usize) {
     indent(out, depth);
     match stmt {
+        Stmt::Include { path, .. } => {
+            out.push_str(&format!("include \"{}\";\n", path));
+        }
         Stmt::QubitDecl { name, size, .. } => {
             out.push_str("qubit");
             if let Some(n) = size {
@@ -307,6 +310,11 @@ mod tests {
              cx q[0], q[1];\n\
              c = measure q;\n",
         );
+    }
+
+    #[test]
+    fn round_trip_include() {
+        round_trip("OPENQASM 3.0; include \"stdgates.inc\";");
     }
 
     #[test]

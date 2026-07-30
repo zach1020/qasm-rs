@@ -161,6 +161,7 @@ impl Parser {
 
     fn parse_stmt(&mut self) -> Result<Stmt> {
         match self.peek() {
+            Some(Token::Include) => self.parse_include(),
             Some(Token::Qubit) => self.parse_qubit_decl(),
             Some(Token::Bit) => self.parse_bit_decl(),
             Some(Token::Qreg) => self.parse_qreg_decl(),
@@ -181,6 +182,23 @@ impl Parser {
             Some(Token::Ident(_)) => self.parse_ident_stmt(),
             _ => Err(self.error("unexpected token at statement level")),
         }
+    }
+
+    fn parse_include(&mut self) -> Result<Stmt> {
+        let start = self.peek_span();
+        self.advance();
+        let path = match self.peek().cloned() {
+            Some(Token::StringLiteral(path)) => {
+                self.advance();
+                path
+            }
+            _ => return Err(self.error("expected a quoted include path")),
+        };
+        let end = self.expect(&Token::Semicolon)?;
+        Ok(Stmt::Include {
+            path,
+            span: Self::merge(&start, &end),
+        })
     }
 
     fn parse_qubit_decl(&mut self) -> Result<Stmt> {
@@ -808,6 +826,16 @@ mod tests {
         let mut parser = Parser::new(source);
         let program = parser.parse().expect("parse failed");
         assert_eq!(program.statements.len(), 5);
+    }
+
+    #[test]
+    fn parse_include() {
+        let mut parser = Parser::new("OPENQASM 3.0; include \"stdgates.inc\";");
+        let program = parser.parse().expect("include should parse");
+        assert!(matches!(
+            &program.statements[0],
+            Stmt::Include { path, .. } if path == "stdgates.inc"
+        ));
     }
 
     #[test]

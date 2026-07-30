@@ -92,6 +92,77 @@ struct GateSig {
     decl_span: Span,
 }
 
+fn standard_gate_signature(name: &str) -> Option<(usize, usize)> {
+    match name.to_ascii_lowercase().as_str() {
+        "u" => Some((3, 1)),
+        "gphase" => Some((1, 0)),
+        "id" | "x" | "y" | "z" | "h" | "s" | "sdg" | "t" | "tdg" | "sx" => Some((0, 1)),
+        "p" | "rx" | "ry" | "rz" => Some((1, 1)),
+        "cx" | "cnot" | "cy" | "cz" | "ch" | "swap" => Some((0, 2)),
+        "cp" | "crx" | "cry" | "crz" => Some((1, 2)),
+        "ccx" | "cswap" => Some((0, 3)),
+        _ => None,
+    }
+}
+
+fn modifier_control_count(modifiers: &[GateModifier]) -> Option<usize> {
+    let mut total = 0usize;
+    for modifier in modifiers {
+        match modifier {
+            GateModifier::Ctrl(arg, _) | GateModifier::NegCtrl(arg, _) => {
+                let count = match arg {
+                    Some(expr) => eval_const_int(expr)?,
+                    None => 1,
+                };
+                if count <= 0 {
+                    return None;
+                }
+                total = total.checked_add(count.try_into().ok()?)?;
+            }
+            GateModifier::Inv(_) | GateModifier::Pow(_, _) => {}
+        }
+    }
+    Some(total)
+}
+
+fn eval_const_int(expr: &Expr) -> Option<i128> {
+    match expr {
+        Expr::IntLit(value, _) => Some((*value).into()),
+        Expr::Neg(inner, _) => eval_const_int(inner)?.checked_neg(),
+        Expr::BinOp { op, lhs, rhs, .. } => {
+            let lhs = eval_const_int(lhs)?;
+            let rhs = eval_const_int(rhs)?;
+            match op {
+                BinOp::Add => lhs.checked_add(rhs),
+                BinOp::Sub => lhs.checked_sub(rhs),
+                BinOp::Mul => lhs.checked_mul(rhs),
+                BinOp::Div => lhs.checked_div(rhs),
+                BinOp::Pow => {
+                    let exponent: u32 = rhs.try_into().ok()?;
+                    lhs.checked_pow(exponent)
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+fn type_name(ty: ClassicalType) -> &'static str {
+    match ty {
+        ClassicalType::Int => "int",
+        ClassicalType::Float => "float",
+        ClassicalType::Bool => "bool",
+    }
+}
+
+fn is_numeric(ty: ClassicalType) -> bool {
+    matches!(ty, ClassicalType::Int | ClassicalType::Float)
+}
+
+fn assignable(expected: ClassicalType, actual: ClassicalType) -> bool {
+    expected == actual || (expected == ClassicalType::Float && actual == ClassicalType::Int)
+}
+
 // ── Scoped symbol table ─────────────────────────────────────
 
 struct SymbolTable {
@@ -322,6 +393,8 @@ impl SemaContext {
 
     fn analyze_stmt(&mut self, stmt: &Stmt) {
         match stmt {
+            Stmt::Include { .. } => {}
+
             Stmt::QubitDecl { name, size, span } => {
                 self.declare(name, SymbolKind::Qubit, *size, span);
             }
@@ -338,62 +411,145 @@ impl SemaContext {
             } => {
                 self.declare(name, SymbolKind::Classical(*ty), None, span);
                 if let Some(expr) = init {
-                    self.check_expr(expr);
+                    if let Some(actual) = self.check_expr(expr) {
+                        if !assignable(*ty, actual) {
+                            self.diags.push(Diagnostic::error(
+                                format!(
+                                    "cannot initialize {} `{}` with {} expression",
+                                    type_name(*ty),
+                                    name,
+                                    type_name(actual)
+                                ),
+                                expr.span().clone(),
+                            ));
+                        }
+                    }
                 }
             }
 
             Stmt::Assignment {
-                name, value, span, ..
+                name,
+                op,
+                value,
+                span,
             } => {
-                if self.symbols.get(name).is_none() {
-                    self.diags.push(Diagnostic::error(
+                let target = self.symbols.get(name).cloned();
+                let actual = self.check_expr(value);
+                match target {
+                    None => self.diags.push(Diagnostic::error(
                         format!("`{}` is not declared", name),
                         span.clone(),
-                    ));
+                    )),
+                    Some(Symbol {
+                        kind: SymbolKind::Classical(expected),
+                        ..
+                    }) => {
+                        if let Some(actual) = actual {
+                            if !assignable(expected, actual) {
+                                self.diags.push(Diagnostic::error(
+                                    format!(
+                                        "cannot assign {} expression to {} `{}`",
+                                        type_name(actual),
+                                        type_name(expected),
+                                        name
+                                    ),
+                                    value.span().clone(),
+                                ));
+                            }
+                            if !matches!(op, AssignOp::Assign)
+                                && (!is_numeric(expected) || !is_numeric(actual))
+                            {
+                                self.diags.push(Diagnostic::error(
+                                    "compound assignment requires numeric operands",
+                                    span.clone(),
+                                ));
+                            }
+                        }
+                    }
+                    Some(_) => self.diags.push(Diagnostic::error(
+                        format!("`{}` is not an assignable classical variable", name),
+                        span.clone(),
+                    )),
                 }
-                self.check_expr(value);
             }
 
             Stmt::GateCall {
                 name,
-                modifiers: _,
+                modifiers,
                 params,
                 args,
                 span,
             } => {
                 // Gate arity check.
-                if let Some(sig) = self.gates.get(name).cloned() {
-                    if params.len() != sig.param_count {
-                        self.diags.push(Diagnostic::error_with_note(
-                            format!(
-                                "gate `{}` expects {} parameter(s), got {}",
-                                name,
-                                sig.param_count,
-                                params.len()
-                            ),
-                            span.clone(),
-                            format!("`{}` defined here", name),
-                            sig.decl_span.clone(),
-                        ));
+                let signature = self
+                    .gates
+                    .get(name)
+                    .map(|sig| {
+                        (
+                            sig.param_count,
+                            sig.qubit_count,
+                            Some(sig.decl_span.clone()),
+                        )
+                    })
+                    .or_else(|| {
+                        standard_gate_signature(name).map(|(params, qubits)| (params, qubits, None))
+                    });
+                if let Some((param_count, qubit_count, decl_span)) = signature {
+                    if params.len() != param_count {
+                        let message = format!(
+                            "gate `{}` expects {} parameter(s), got {}",
+                            name,
+                            param_count,
+                            params.len()
+                        );
+                        if let Some(decl_span) = decl_span.clone() {
+                            self.diags.push(Diagnostic::error_with_note(
+                                message,
+                                span.clone(),
+                                format!("`{}` defined here", name),
+                                decl_span,
+                            ));
+                        } else {
+                            self.diags.push(Diagnostic::error(message, span.clone()));
+                        }
                     }
-                    if args.len() != sig.qubit_count {
-                        self.diags.push(Diagnostic::error_with_note(
-                            format!(
-                                "gate `{}` expects {} qubit(s), got {}",
-                                name,
-                                sig.qubit_count,
-                                args.len()
-                            ),
-                            span.clone(),
-                            format!("`{}` defined here", name),
-                            sig.decl_span.clone(),
-                        ));
+                    let expected_qubits =
+                        qubit_count + modifier_control_count(modifiers).unwrap_or_default();
+                    if args.len() != expected_qubits {
+                        let message = format!(
+                            "gate `{}` expects {} qubit(s) after modifiers, got {}",
+                            name,
+                            expected_qubits,
+                            args.len()
+                        );
+                        if let Some(decl_span) = decl_span {
+                            self.diags.push(Diagnostic::error_with_note(
+                                message,
+                                span.clone(),
+                                format!("`{}` defined here", name),
+                                decl_span,
+                            ));
+                        } else {
+                            self.diags.push(Diagnostic::error(message, span.clone()));
+                        }
                     }
+                } else {
+                    self.diags.push(Diagnostic::error(
+                        format!("gate `{}` is not defined", name),
+                        span.clone(),
+                    ));
                 }
-                // Don't require built-in gates to be defined.
 
+                self.check_modifiers(modifiers);
                 for p in params {
-                    self.check_expr(p);
+                    if let Some(ty) = self.check_expr(p) {
+                        if !is_numeric(ty) {
+                            self.diags.push(Diagnostic::error(
+                                "gate parameters must be numeric",
+                                p.span().clone(),
+                            ));
+                        }
+                    }
                 }
                 for op in args {
                     self.check_operand(op, Some(SymbolKind::Qubit));
@@ -487,7 +643,7 @@ impl SemaContext {
                 else_body,
                 ..
             } => {
-                self.check_expr(condition);
+                self.require_type(condition, ClassicalType::Bool, "if condition");
 
                 // Conservative linearity: save measured state, analyze both
                 // branches, then merge (union) — if either branch measures a
@@ -529,10 +685,16 @@ impl SemaContext {
                 body,
                 span,
             } => {
-                self.check_expr(&range.start);
-                self.check_expr(&range.end);
+                if *var_ty != ClassicalType::Int {
+                    self.diags.push(Diagnostic::error(
+                        "for-loop variable must have type int",
+                        span.clone(),
+                    ));
+                }
+                self.require_type(&range.start, ClassicalType::Int, "for-loop range bound");
+                self.require_type(&range.end, ClassicalType::Int, "for-loop range bound");
                 if let Some(ref step) = range.step {
-                    self.check_expr(step);
+                    self.require_type(step, ClassicalType::Int, "for-loop range step");
                 }
 
                 // Loop body in new scope with loop variable.
@@ -561,7 +723,7 @@ impl SemaContext {
             Stmt::While {
                 condition, body, ..
             } => {
-                self.check_expr(condition);
+                self.require_type(condition, ClassicalType::Bool, "while condition");
 
                 let measured_before = self.measured.clone();
                 self.symbols.push_scope();
@@ -579,27 +741,127 @@ impl SemaContext {
         }
     }
 
-    /// Validate expressions (check that identifiers are declared).
-    fn check_expr(&mut self, expr: &Expr) {
+    fn check_modifiers(&mut self, modifiers: &[GateModifier]) {
+        for modifier in modifiers {
+            match modifier {
+                GateModifier::Ctrl(arg, span) | GateModifier::NegCtrl(arg, span) => {
+                    if let Some(arg) = arg {
+                        self.require_type(arg, ClassicalType::Int, "control modifier argument");
+                        if !matches!(eval_const_int(arg), Some(value) if value > 0) {
+                            self.diags.push(Diagnostic::error(
+                                "control count must be a positive compile-time integer",
+                                span.clone(),
+                            ));
+                        }
+                    }
+                }
+                GateModifier::Pow(expr, _) => {
+                    if let Some(ty) = self.check_expr(expr) {
+                        if !is_numeric(ty) {
+                            self.diags.push(Diagnostic::error(
+                                "power modifier argument must be numeric",
+                                expr.span().clone(),
+                            ));
+                        }
+                    }
+                }
+                GateModifier::Inv(_) => {}
+            }
+        }
+    }
+
+    fn require_type(&mut self, expr: &Expr, expected: ClassicalType, context: &str) {
+        if let Some(actual) = self.check_expr(expr) {
+            if !assignable(expected, actual) {
+                self.diags.push(Diagnostic::error(
+                    format!(
+                        "{} must have type {}, found {}",
+                        context,
+                        type_name(expected),
+                        type_name(actual)
+                    ),
+                    expr.span().clone(),
+                ));
+            }
+        }
+    }
+
+    /// Validate an expression and return its inferred classical type.
+    fn check_expr(&mut self, expr: &Expr) -> Option<ClassicalType> {
         match expr {
-            Expr::Ident(name, span) => {
-                if self.symbols.get(name).is_none() {
+            Expr::Ident(name, span) => match self.symbols.get(name).map(|symbol| symbol.kind) {
+                Some(SymbolKind::Classical(ty)) => Some(ty),
+                Some(SymbolKind::Bit) => Some(ClassicalType::Int),
+                Some(SymbolKind::GateParam) => Some(ClassicalType::Float),
+                Some(_) => {
+                    self.diags.push(Diagnostic::error(
+                        format!("`{}` cannot be used as a classical expression", name),
+                        span.clone(),
+                    ));
+                    None
+                }
+                None => {
                     self.diags.push(Diagnostic::error(
                         format!("`{}` is not declared", name),
                         span.clone(),
                     ));
+                    None
+                }
+            },
+            Expr::IntLit(..) => Some(ClassicalType::Int),
+            Expr::FloatLit(..) | Expr::Const(..) => Some(ClassicalType::Float),
+            Expr::BoolLit(..) => Some(ClassicalType::Bool),
+            Expr::Neg(inner, span) => match self.check_expr(inner) {
+                Some(ty) if is_numeric(ty) => Some(ty),
+                Some(_) => {
+                    self.diags.push(Diagnostic::error(
+                        "unary negation requires a numeric operand",
+                        span.clone(),
+                    ));
+                    None
+                }
+                None => None,
+            },
+            Expr::BinOp { lhs, rhs, span, .. } => {
+                let lhs_ty = self.check_expr(lhs);
+                let rhs_ty = self.check_expr(rhs);
+                match (lhs_ty, rhs_ty) {
+                    (Some(lhs_ty), Some(rhs_ty)) if is_numeric(lhs_ty) && is_numeric(rhs_ty) => {
+                        if lhs_ty == ClassicalType::Float || rhs_ty == ClassicalType::Float {
+                            Some(ClassicalType::Float)
+                        } else {
+                            Some(ClassicalType::Int)
+                        }
+                    }
+                    (Some(_), Some(_)) => {
+                        self.diags.push(Diagnostic::error(
+                            "arithmetic operators require numeric operands",
+                            span.clone(),
+                        ));
+                        None
+                    }
+                    _ => None,
                 }
             }
-            Expr::Neg(inner, _) => self.check_expr(inner),
-            Expr::BinOp { lhs, rhs, .. } => {
-                self.check_expr(lhs);
-                self.check_expr(rhs);
+            Expr::Compare { lhs, rhs, span, .. } => {
+                let lhs_ty = self.check_expr(lhs);
+                let rhs_ty = self.check_expr(rhs);
+                match (lhs_ty, rhs_ty) {
+                    (Some(lhs_ty), Some(rhs_ty))
+                        if lhs_ty == rhs_ty || (is_numeric(lhs_ty) && is_numeric(rhs_ty)) =>
+                    {
+                        Some(ClassicalType::Bool)
+                    }
+                    (Some(_), Some(_)) => {
+                        self.diags.push(Diagnostic::error(
+                            "comparison operands have incompatible types",
+                            span.clone(),
+                        ));
+                        None
+                    }
+                    _ => None,
+                }
             }
-            Expr::Compare { lhs, rhs, .. } => {
-                self.check_expr(lhs);
-                self.check_expr(rhs);
-            }
-            _ => {} // literals and constants are always valid
         }
     }
 }
@@ -743,6 +1005,42 @@ mod tests {
     fn classical_decl_and_assignment() {
         let diags = analyze_source("OPENQASM 3.0; int x = 42; x = 10; x += 1;");
         assert!(errors(&diags).is_empty(), "expected no errors: {:?}", diags);
+    }
+
+    #[test]
+    fn rejects_classical_type_mismatches() {
+        let diags = analyze_source("OPENQASM 3.0; int x = true; bool flag = 3; x = false;");
+        assert_eq!(errors(&diags).len(), 3);
+        assert!(errors(&diags)
+            .iter()
+            .all(|diag| diag.message.contains("cannot")));
+    }
+
+    #[test]
+    fn rejects_non_boolean_conditions() {
+        let diags = analyze_source("OPENQASM 3.0; int x = 1; if (x) { x = 2; }");
+        assert!(errors(&diags)
+            .iter()
+            .any(|diag| diag.message.contains("if condition must have type bool")));
+    }
+
+    #[test]
+    fn rejects_unknown_gate() {
+        let diags = analyze_source("OPENQASM 3.0; qubit q; totally_unknown q;");
+        assert!(errors(&diags)
+            .iter()
+            .any(|diag| diag.message.contains("is not defined")));
+    }
+
+    #[test]
+    fn validates_control_modifier_count() {
+        let valid = analyze_source("OPENQASM 3.0; qubit[3] q; ctrl(1 + 1) @ x q[0], q[1], q[2];");
+        assert!(errors(&valid).is_empty(), "{valid:?}");
+
+        let invalid = analyze_source("OPENQASM 3.0; qubit q; ctrl(0) @ x q;");
+        assert!(errors(&invalid)
+            .iter()
+            .any(|diag| diag.message.contains("positive compile-time integer")));
     }
 
     #[test]

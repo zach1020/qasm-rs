@@ -68,11 +68,11 @@ Lexer, parser, and semantic errors are rendered with [ariadne](https://github.co
 
 ## Supported language features
 
-**Quantum operations:** qubit/bit declarations (scalar and register), gate calls with parameters, gate definitions with classical and qubit parameters, gate modifiers (`ctrl`, `negctrl`, `inv`, `pow`), measurement, reset, barrier.
+**Quantum operations:** qubit/bit declarations (scalar and register), register broadcasting, gate calls with parameters, gate definitions with classical and qubit parameters, gate modifiers (`ctrl`, `negctrl`, `inv`, `pow`), measurement, reset, barrier, and `include` directives. The compiler recognizes the common OpenQASM standard-gate signatures while preserving include directives in emitted code.
 
 **Classical control flow:** `if`/`else`, `for` loops with range expressions, `while` loops are parsed, semantically analyzed, preserved in HIR, and emitted by the full compiler pipeline. Optimization currently applies to straight-line quantum regions inside those control-flow bodies.
 
-**Classical types:** `int`, `float`, `bool` declarations with optional initializers, assignment (`=`, `+=`, `-=`).
+**Classical types:** `int`, `float`, `bool` declarations with optional initializers, assignment (`=`, `+=`, `-=`), expression type checking, and Boolean condition validation.
 
 **Expressions:** Pratt parser with correct precedence — arithmetic (`+`, `-`, `*`, `/`, `**` right-associative), comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`), unary negation, parenthesization, built-in constants (`pi`, `tau`, `euler`).
 
@@ -139,7 +139,7 @@ cargo test
 cargo run -- path/to/input.qasm
 ```
 
-Requires Rust 1.70+.
+Requires Rust 1.85+.
 
 ## Architecture
 
@@ -194,7 +194,7 @@ The optimizer runs fixed-point iteration — removing X·X exposes the H·H pair
 - [x] High-level IR preserving control flow around DAG regions
 - [x] Full-pipeline control-flow emission from HIR
 - [x] Adjacent inverse gate cancellation
-- [ ] Integration test fixtures and CLI smoke tests
+- [x] Integration test fixtures and CLI smoke tests
 - [ ] Gate commutation analysis
 - [ ] Template-based peephole optimization
 - [ ] Function definitions (`def`) and inlining
@@ -203,4 +203,4 @@ The optimizer runs fixed-point iteration — removing X·X exposes the H·H pair
 
 ## License
 
-MIT
+[MIT](LICENSE)

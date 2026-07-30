@@ -64,8 +64,8 @@ impl Op {
 /// Gate modifier carried through to the IR.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Modifier {
-    Ctrl(Option<u64>),
-    NegCtrl(Option<u64>),
+    Ctrl(Option<Param>),
+    NegCtrl(Option<Param>),
     Inv,
     Pow(Param),
 }
@@ -665,8 +665,20 @@ impl fmt::Display for CircuitDAG {
                 } => {
                     for m in modifiers {
                         match m {
-                            Modifier::Ctrl(_) => write!(f, "ctrl @ ")?,
-                            Modifier::NegCtrl(_) => write!(f, "negctrl @ ")?,
+                            Modifier::Ctrl(arg) => {
+                                write!(f, "ctrl")?;
+                                if let Some(arg) = arg {
+                                    write!(f, "({})", arg)?;
+                                }
+                                write!(f, " @ ")?;
+                            }
+                            Modifier::NegCtrl(arg) => {
+                                write!(f, "negctrl")?;
+                                if let Some(arg) = arg {
+                                    write!(f, "({})", arg)?;
+                                }
+                                write!(f, " @ ")?;
+                            }
                             Modifier::Inv => write!(f, "inv @ ")?,
                             Modifier::Pow(p) => write!(f, "pow({}) @ ", p)?,
                         }

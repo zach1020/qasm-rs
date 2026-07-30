@@ -3,6 +3,12 @@ name = "qasm-rs"
 version = "0.1.0"
 edition = "2021"
 description = "An OpenQASM 3 compiler with compile-time qubit linearity enforcement"
+license = "MIT"
+repository = "https://github.com/zach1020/qasm-rs"
+readme = "README.md"
+rust-version = "1.85"
+keywords = ["openqasm", "quantum", "compiler", "circuits"]
+categories = ["compilers", "science"]
 
 [dependencies]
 logos = "0.14"

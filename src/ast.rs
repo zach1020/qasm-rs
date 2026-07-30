@@ -10,6 +10,10 @@ pub struct Program {
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
+    Include {
+        path: String,
+        span: Span,
+    },
     QubitDecl {
         name: String,
         size: Option<u64>,
@@ -82,7 +86,8 @@ pub enum Stmt {
 impl Stmt {
     pub fn span(&self) -> &Span {
         match self {
-            Stmt::QubitDecl { span, .. }
+            Stmt::Include { span, .. }
+            | Stmt::QubitDecl { span, .. }
             | Stmt::BitDecl { span, .. }
             | Stmt::ClassicalDecl { span, .. }
             | Stmt::Assignment { span, .. }

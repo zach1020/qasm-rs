@@ -8,8 +8,10 @@
 //!   - **Adjacent inverse cancellation**: remove pairs of self-inverse
 //!     gates (H·H = I, X·X = I, Y·Y = I, Z·Z = I, CX·CX = I).
 
-use crate::hir;
+use std::collections::HashSet;
+
 use crate::ir::*;
+use crate::{ast, hir};
 
 /// Statistics returned by an optimization pass.
 #[derive(Debug, Default)]
@@ -40,7 +42,7 @@ pub struct OptStats {
 fn is_self_inverse(name: &str) -> bool {
     matches!(
         name.to_lowercase().as_str(),
-        "h" | "x" | "y" | "z" | "cx" | "cnot" | "cz" | "swap" | "s" | "sdg" | "t" | "tdg"
+        "h" | "x" | "y" | "z" | "cx" | "cnot" | "cz" | "swap"
     )
 }
 
@@ -128,6 +130,10 @@ fn adjacent_on_all_wires(dag: &CircuitDAG, a: NodeId, b: NodeId) -> bool {
 
 /// Run adjacent inverse cancellation. Returns statistics.
 pub fn cancel_inverses(dag: &mut CircuitDAG) -> OptStats {
+    cancel_inverses_except(dag, &HashSet::new())
+}
+
+fn cancel_inverses_except(dag: &mut CircuitDAG, excluded_gates: &HashSet<String>) -> OptStats {
     let mut stats = OptStats::default();
     let mut changed = true;
 
@@ -150,7 +156,14 @@ pub fn cancel_inverses(dag: &mut CircuitDAG) -> OptStats {
                 }
 
                 // Check cancellation.
-                if gates_cancel(dag, current, next) && adjacent_on_all_wires(dag, current, next) {
+                let gate_is_excluded = match &dag.node(current).op {
+                    Op::Gate { name, .. } => excluded_gates.contains(&name.to_ascii_lowercase()),
+                    _ => false,
+                };
+                if !gate_is_excluded
+                    && gates_cancel(dag, current, next)
+                    && adjacent_on_all_wires(dag, current, next)
+                {
                     // Get the predecessor of `current` on this wire
                     // before we remove nodes, so we can continue from there.
                     let prev = dag.wire_predecessor(current, wire);
@@ -177,30 +190,57 @@ pub fn cancel_inverses(dag: &mut CircuitDAG) -> OptStats {
 
 /// Run DAG optimizations over every straight-line circuit region in HIR.
 pub fn optimize_hir(program: &mut hir::HirProgram) -> OptStats {
-    optimize_hir_stmts(&mut program.statements)
+    let mut custom_gates = HashSet::new();
+    collect_custom_gates(&program.statements, &mut custom_gates);
+    optimize_hir_stmts(&mut program.statements, &custom_gates)
 }
 
-fn optimize_hir_stmts(stmts: &mut [hir::HirStmt]) -> OptStats {
-    let mut stats = OptStats::default();
-
+fn collect_custom_gates(stmts: &[hir::HirStmt], custom_gates: &mut HashSet<String>) {
     for stmt in stmts {
         match stmt {
-            hir::HirStmt::Ast(_) => {}
-            hir::HirStmt::Circuit(dag) => {
-                stats.gates_removed += cancel_inverses(dag).gates_removed;
+            hir::HirStmt::Ast(ast::Stmt::GateDef { name, .. }) => {
+                custom_gates.insert(name.to_ascii_lowercase());
             }
             hir::HirStmt::If {
                 then_body,
                 else_body,
                 ..
             } => {
-                stats.gates_removed += optimize_hir_stmts(then_body).gates_removed;
+                collect_custom_gates(then_body, custom_gates);
                 if let Some(else_body) = else_body {
-                    stats.gates_removed += optimize_hir_stmts(else_body).gates_removed;
+                    collect_custom_gates(else_body, custom_gates);
                 }
             }
             hir::HirStmt::For { body, .. } | hir::HirStmt::While { body, .. } => {
-                stats.gates_removed += optimize_hir_stmts(body).gates_removed;
+                collect_custom_gates(body, custom_gates);
+            }
+            hir::HirStmt::Ast(_) | hir::HirStmt::Circuit(_) => {}
+        }
+    }
+}
+
+fn optimize_hir_stmts(stmts: &mut [hir::HirStmt], excluded_gates: &HashSet<String>) -> OptStats {
+    let mut stats = OptStats::default();
+
+    for stmt in stmts {
+        match stmt {
+            hir::HirStmt::Ast(_) => {}
+            hir::HirStmt::Circuit(dag) => {
+                stats.gates_removed += cancel_inverses_except(dag, excluded_gates).gates_removed;
+            }
+            hir::HirStmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                stats.gates_removed += optimize_hir_stmts(then_body, excluded_gates).gates_removed;
+                if let Some(else_body) = else_body {
+                    stats.gates_removed +=
+                        optimize_hir_stmts(else_body, excluded_gates).gates_removed;
+                }
+            }
+            hir::HirStmt::For { body, .. } | hir::HirStmt::While { body, .. } => {
+                stats.gates_removed += optimize_hir_stmts(body, excluded_gates).gates_removed;
             }
         }
     }
@@ -290,6 +330,27 @@ mod tests {
         let stats = cancel_inverses(&mut dag);
         assert_eq!(stats.gates_removed, 2);
         assert_eq!(dag.gate_count(), 0);
+    }
+
+    #[test]
+    fn does_not_cancel_repeated_phase_gates() {
+        for gate in ["s", "sdg", "t", "tdg"] {
+            let source = format!("OPENQASM 3.0; qubit q; {gate} q; {gate} q;");
+            let mut dag = lower_source(&source);
+            let stats = cancel_inverses(&mut dag);
+            assert_eq!(stats.gates_removed, 0, "{gate} is not self-inverse");
+            assert_eq!(dag.gate_count(), 2);
+        }
+    }
+
+    #[test]
+    fn does_not_optimize_user_defined_gate_by_name() {
+        let mut parser = Parser::new("OPENQASM 3.0; gate h q { x q; } qubit q; h q; h q;");
+        let program = parser.parse().expect("parse failed");
+        let mut hir = lower::lower_hir(&program).expect("lowering failed");
+        let stats = optimize_hir(&mut hir);
+        assert_eq!(stats.gates_removed, 0);
+        assert_eq!(hir.gate_count(), 2);
     }
 
     #[test]
