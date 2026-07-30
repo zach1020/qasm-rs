@@ -26,6 +26,9 @@ pub(crate) fn indent(out: &mut String, depth: usize) {
 pub(crate) fn emit_stmt(out: &mut String, stmt: &Stmt, depth: usize) {
     indent(out, depth);
     match stmt {
+        Stmt::Include { path, .. } => {
+            out.push_str(&format!("include \"{}\";\n", path));
+        }
         Stmt::QubitDecl { name, size, .. } => {
             out.push_str("qubit");
             if let Some(n) = size {
@@ -42,7 +45,16 @@ pub(crate) fn emit_stmt(out: &mut String, stmt: &Stmt, depth: usize) {
             out.push_str(&format!(" {};\n", name));
         }
 
-        Stmt::ClassicalDecl { ty, name, init, .. } => {
+        Stmt::ClassicalDecl {
+            qualifier,
+            ty,
+            name,
+            init,
+            ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                out.push_str(&format!("{} ", qualifier));
+            }
             out.push_str(&format!("{} {}", ty, name));
             if let Some(expr) = init {
                 out.push_str(" = ");
@@ -111,6 +123,29 @@ pub(crate) fn emit_stmt(out: &mut String, stmt: &Stmt, depth: usize) {
             out.push_str("}\n");
         }
 
+        Stmt::FunctionDef {
+            name,
+            params,
+            return_type,
+            body,
+            ..
+        } => {
+            out.push_str(&format!("def {}(", name));
+            for (index, (ty, param_name)) in params.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("{} {}", ty, param_name));
+            }
+            out.push_str(&format!(") -> {} {{\n", return_type));
+            indent(out, depth + 1);
+            out.push_str("return ");
+            emit_expr(out, body);
+            out.push_str(";\n");
+            indent(out, depth);
+            out.push_str("}\n");
+        }
+
         Stmt::Measure { qubit, target, .. } => {
             if let Some(t) = target {
                 out.push_str(&format!("{} = measure {};\n", t, qubit));
@@ -125,6 +160,16 @@ pub(crate) fn emit_stmt(out: &mut String, stmt: &Stmt, depth: usize) {
 
         Stmt::Barrier { targets, .. } => {
             out.push_str("barrier ");
+            emit_operand_list(out, targets);
+            out.push_str(";\n");
+        }
+
+        Stmt::Delay {
+            duration, targets, ..
+        } => {
+            out.push_str("delay[");
+            emit_expr(out, duration);
+            out.push_str("] ");
             emit_operand_list(out, targets);
             out.push_str(";\n");
         }
@@ -238,6 +283,20 @@ pub(crate) fn emit_expr(out: &mut String, expr: &Expr) {
         Expr::FloatLit(f, _) => out.push_str(&format!("{}", f)),
         Expr::BoolLit(b, _) => out.push_str(if *b { "true" } else { "false" }),
         Expr::Ident(name, _) => out.push_str(name),
+        Expr::Index { name, index, .. } => {
+            out.push_str(&format!("{}[{}]", name, index));
+        }
+        Expr::Call { name, args, .. } => {
+            out.push_str(name);
+            out.push('(');
+            for (index, arg) in args.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                emit_expr(out, arg);
+            }
+            out.push(')');
+        }
         Expr::Const(kind, _) => out.push_str(&kind.to_string()),
         Expr::Neg(inner, _) => {
             out.push('-');
@@ -310,6 +369,11 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_include() {
+        round_trip("OPENQASM 3.0; include \"stdgates.inc\";");
+    }
+
+    #[test]
     fn round_trip_scalar() {
         round_trip("OPENQASM 3.0; qubit q; bit c; h q; measure q; reset q;");
     }
@@ -317,6 +381,11 @@ mod tests {
     #[test]
     fn round_trip_barrier() {
         round_trip("OPENQASM 3.0; qubit[3] q; barrier q[0], q[1], q[2];");
+    }
+
+    #[test]
+    fn round_trip_delay() {
+        round_trip("OPENQASM 3.0; qubit[2] q; delay[10] q[0:1];");
     }
 
     #[test]
@@ -394,6 +463,16 @@ mod tests {
     #[test]
     fn round_trip_classical_decl() {
         round_trip("OPENQASM 3.0; int x = 42; float y; bool flag = true;");
+    }
+
+    #[test]
+    fn round_trip_qualified_classical_decl() {
+        round_trip("OPENQASM 3.0; const int shots = 100; input float theta; output bool result;");
+    }
+
+    #[test]
+    fn round_trip_expression_function() {
+        round_trip("OPENQASM 3.0; def twice(int x) -> int { return x * 2; } int y = twice(3);");
     }
 
     #[test]

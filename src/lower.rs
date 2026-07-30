@@ -121,6 +121,16 @@ impl WireMap {
     /// Resolve a classical bit operand that might be a whole register.
     /// If no index is given and it's a register, returns all bit IDs.
     fn resolve_bit_operand(&self, op: &ast::GateOperand) -> Result<Vec<usize>> {
+        if let Some((start, end)) = op.slice {
+            return (start..=end)
+                .map(|index| {
+                    self.bits
+                        .get(&(op.name.clone(), Some(index)))
+                        .copied()
+                        .ok_or_else(|| err(format!("unresolved bit `{}[{}]`", op.name, index)))
+                })
+                .collect();
+        }
         if op.index.is_some() {
             return Ok(vec![self.resolve_bit(op)?]);
         }
@@ -146,6 +156,16 @@ impl WireMap {
     /// Resolve a qubit operand that might be a whole register.
     /// If no index is given and it's a register, returns all wire IDs.
     fn resolve_qubit_operand(&self, op: &ast::GateOperand) -> Result<Vec<usize>> {
+        if let Some((start, end)) = op.slice {
+            return (start..=end)
+                .map(|index| {
+                    self.qubits
+                        .get(&(op.name.clone(), Some(index)))
+                        .copied()
+                        .ok_or_else(|| err(format!("unresolved qubit `{}[{}]`", op.name, index)))
+                })
+                .collect();
+        }
         if op.index.is_some() {
             return Ok(vec![self.resolve_qubit(op)?]);
         }
@@ -177,6 +197,11 @@ fn lower_expr(expr: &ast::Expr) -> Param {
         ast::Expr::FloatLit(f, _) => Param::Float(*f),
         ast::Expr::BoolLit(b, _) => Param::Int(if *b { 1 } else { 0 }),
         ast::Expr::Ident(name, _) => Param::Ident(name.clone()),
+        ast::Expr::Index { name, index, .. } => Param::Ident(format!("{}[{}]", name, index)),
+        ast::Expr::Call { name, args, .. } => Param::Call {
+            name: name.clone(),
+            args: args.iter().map(lower_expr).collect(),
+        },
         ast::Expr::Const(kind, _) => match kind {
             ast::ConstKind::Pi => Param::Pi,
             ast::ConstKind::Tau => Param::Tau,
@@ -206,20 +231,8 @@ fn lower_expr(expr: &ast::Expr) -> Param {
 
 fn lower_modifier(m: &ast::GateModifier) -> Modifier {
     match m {
-        ast::GateModifier::Ctrl(arg, _) => {
-            let n = arg.as_ref().and_then(|e| match e {
-                ast::Expr::IntLit(n, _) => Some(*n),
-                _ => None,
-            });
-            Modifier::Ctrl(n)
-        }
-        ast::GateModifier::NegCtrl(arg, _) => {
-            let n = arg.as_ref().and_then(|e| match e {
-                ast::Expr::IntLit(n, _) => Some(*n),
-                _ => None,
-            });
-            Modifier::NegCtrl(n)
-        }
+        ast::GateModifier::Ctrl(arg, _) => Modifier::Ctrl(arg.as_ref().map(lower_expr)),
+        ast::GateModifier::NegCtrl(arg, _) => Modifier::NegCtrl(arg.as_ref().map(lower_expr)),
         ast::GateModifier::Inv(_) => Modifier::Inv,
         ast::GateModifier::Pow(e, _) => Modifier::Pow(lower_expr(e)),
     }
@@ -227,13 +240,17 @@ fn lower_modifier(m: &ast::GateModifier) -> Modifier {
 
 // ── Main lowering pass ──────────────────────────────────────
 
-/// Lower a type-checked AST into a CircuitDAG.
-pub fn lower(program: &ast::Program) -> Result<CircuitDAG> {
+/// Lower a type-checked, straight-line AST into a single circuit DAG.
+///
+/// Prefer [`lower_hir`] for complete programs because it preserves classical
+/// control flow. This function remains useful for individual circuit regions.
+pub fn lower_straight_line(program: &ast::Program) -> Result<CircuitDAG> {
     // First pass: collect declarations to determine wire counts.
     let mut wires = WireMap::new();
 
     for stmt in &program.statements {
         match stmt {
+            ast::Stmt::Include { .. } => {}
             ast::Stmt::QubitDecl { name, size, .. } => {
                 wires.add_qubit_register(name, *size);
             }
@@ -258,6 +275,11 @@ pub fn lower(program: &ast::Program) -> Result<CircuitDAG> {
     Ok(dag)
 }
 
+/// Compatibility alias for [`lower_straight_line`].
+pub fn lower(program: &ast::Program) -> Result<CircuitDAG> {
+    lower_straight_line(program)
+}
+
 /// Lower a type-checked AST into HIR.
 pub fn lower_hir(program: &ast::Program) -> Result<hir::HirProgram> {
     let mut wires = WireMap::new();
@@ -276,6 +298,7 @@ pub fn lower_hir(program: &ast::Program) -> Result<hir::HirProgram> {
 fn collect_wire_decls(stmts: &[ast::Stmt], wires: &mut WireMap) {
     for stmt in stmts {
         match stmt {
+            ast::Stmt::Include { .. } => {}
             ast::Stmt::QubitDecl { name, size, .. } => {
                 wires.add_qubit_register(name, *size);
             }
@@ -367,6 +390,7 @@ fn is_circuit_stmt(stmt: &ast::Stmt) -> bool {
             | ast::Stmt::Measure { .. }
             | ast::Stmt::Reset { .. }
             | ast::Stmt::Barrier { .. }
+            | ast::Stmt::Delay { .. }
     )
 }
 
@@ -387,11 +411,13 @@ fn lower_stmts(stmts: &[ast::Stmt], wires: &WireMap, dag: &mut CircuitDAG) -> Re
 fn lower_stmt(stmt: &ast::Stmt, wires: &WireMap, dag: &mut CircuitDAG) -> Result<()> {
     match stmt {
         // Declarations are handled in the first pass.
-        ast::Stmt::QubitDecl { .. }
+        ast::Stmt::Include { .. }
+        | ast::Stmt::QubitDecl { .. }
         | ast::Stmt::BitDecl { .. }
         | ast::Stmt::ClassicalDecl { .. }
         | ast::Stmt::Assignment { .. }
-        | ast::Stmt::GateDef { .. } => Ok(()),
+        | ast::Stmt::GateDef { .. }
+        | ast::Stmt::FunctionDef { .. } => Ok(()),
 
         ast::Stmt::GateCall {
             name,
@@ -402,11 +428,31 @@ fn lower_stmt(stmt: &ast::Stmt, wires: &WireMap, dag: &mut CircuitDAG) -> Result
         } => {
             let ir_params: Vec<Param> = params.iter().map(lower_expr).collect();
             let ir_mods: Vec<Modifier> = modifiers.iter().map(lower_modifier).collect();
-            let mut qubit_wires = Vec::new();
-            for arg in args {
-                qubit_wires.extend(wires.resolve_qubit_operand(arg)?);
+            let resolved: Vec<Vec<usize>> = args
+                .iter()
+                .map(|arg| wires.resolve_qubit_operand(arg))
+                .collect::<Result<_>>()?;
+            let broadcast_len = resolved.iter().map(Vec::len).max().unwrap_or(1);
+            if resolved
+                .iter()
+                .any(|operand| operand.len() != 1 && operand.len() != broadcast_len)
+            {
+                return Err(err(
+                    "gate register operands must have the same length for broadcasting",
+                ));
             }
-            dag.append_gate(name.clone(), ir_mods, ir_params, qubit_wires);
+            for index in 0..broadcast_len {
+                let qubit_wires = resolved
+                    .iter()
+                    .map(|operand| operand[if operand.len() == 1 { 0 } else { index }])
+                    .collect();
+                dag.append_gate(
+                    name.clone(),
+                    ir_mods.clone(),
+                    ir_params.clone(),
+                    qubit_wires,
+                );
+            }
             Ok(())
         }
 
@@ -450,6 +496,17 @@ fn lower_stmt(stmt: &ast::Stmt, wires: &WireMap, dag: &mut CircuitDAG) -> Result
                 qubit_wires.extend(wires.resolve_qubit_operand(t)?);
             }
             dag.append_barrier(qubit_wires);
+            Ok(())
+        }
+
+        ast::Stmt::Delay {
+            duration, targets, ..
+        } => {
+            let mut qubit_wires = Vec::new();
+            for target in targets {
+                qubit_wires.extend(wires.resolve_qubit_operand(target)?);
+            }
+            dag.append_delay(lower_expr(duration), qubit_wires);
             Ok(())
         }
 
@@ -500,6 +557,33 @@ mod tests {
     fn lower_modified_gate() {
         let dag = lower_source("OPENQASM 3.0; qubit[2] q; ctrl @ x q[0], q[1];");
         assert_eq!(dag.gate_count(), 1);
+    }
+
+    #[test]
+    fn lower_preserves_control_count_expression() {
+        let dag = lower_source("OPENQASM 3.0; qubit[3] q; ctrl(1 + 1) @ x q[0], q[1], q[2];");
+        let qasm = dag.emit_qasm();
+        assert!(qasm.contains("ctrl((1 + 1)) @ x"));
+    }
+
+    #[test]
+    fn lower_broadcasts_gate_over_register() {
+        let dag = lower_source("OPENQASM 3.0; qubit[2] q; h q;");
+        assert_eq!(dag.gate_count(), 2);
+        let qasm = dag.emit_qasm();
+        assert!(qasm.contains("h q[0];"));
+        assert!(qasm.contains("h q[1];"));
+    }
+
+    #[test]
+    fn lower_rejects_mismatched_broadcast_registers() {
+        let mut parser = Parser::new("OPENQASM 3.0; qubit[2] a; qubit[3] b; cx a, b;");
+        let program = parser.parse().expect("parse failed");
+        let err = match lower(&program) {
+            Ok(_) => panic!("broadcast lengths should be checked"),
+            Err(err) => err,
+        };
+        assert!(err.message.contains("same length"));
     }
 
     #[test]
