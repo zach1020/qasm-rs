@@ -234,11 +234,12 @@ fn cancel_inverses_except(dag: &mut CircuitDAG, excluded_gates: &HashSet<String>
                 }
 
                 // Check cancellation.
-                let gate_is_excluded = match &dag.node(current).op {
+                let gate_is_excluded = |node| match &dag.node(node).op {
                     Op::Gate { name, .. } => excluded_gates.contains(&name.to_ascii_lowercase()),
                     _ => false,
                 };
-                if !gate_is_excluded
+                if !gate_is_excluded(current)
+                    && !gate_is_excluded(next)
                     && gates_cancel(dag, current, next)
                     && adjacent_on_all_wires(dag, current, next)
                 {
@@ -257,9 +258,13 @@ fn cancel_inverses_except(dag: &mut CircuitDAG, excluded_gates: &HashSet<String>
                         None => break,
                     };
                 } else {
-                    if !gate_is_excluded && gates_commute(dag, current, next) {
+                    if !gate_is_excluded(current)
+                        && !gate_is_excluded(next)
+                        && gates_commute(dag, current, next)
+                    {
                         if let Some(candidate) = dag.wire_successor(next, wire) {
                             if dag.node(candidate).op.is_gate()
+                                && !gate_is_excluded(candidate)
                                 && gates_cancel(dag, current, candidate)
                                 && commuting_separator_on_all_wires(
                                     dag, current, next, candidate, wire,

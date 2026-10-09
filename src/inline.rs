@@ -56,7 +56,15 @@ fn collect_gate_calls(
 ) {
     match statement {
         Stmt::GateCall { name, .. } if definitions.contains_key(name) => {
-            calls.insert(name.clone());
+            // Retained definitions keep their original bodies, so preserve the
+            // complete dependency closure. Mark before visiting to handle cycles.
+            if calls.insert(name.clone()) {
+                if let Stmt::GateDef { body, .. } = &definitions[name] {
+                    for statement in body {
+                        collect_gate_calls(statement, definitions, calls);
+                    }
+                }
+            }
         }
         Stmt::If {
             then_body,
